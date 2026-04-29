@@ -1,0 +1,15 @@
+{
+  "id": "ReinforcementDeck",
+  "name": "Reinforcement Deck",
+  "display_name": "Reinforcement Deck",
+  "author": ["Custom"],
+  "description": "A jokerless deck where playing cards stack unlimited enhancements, seals, and editions. Tarots and Spectrals always increment - they never replace.",
+  "prefix": "rd",
+  "main_file": "ReinforcementDeck.lua",
+  "badge_colour": "8844AA",
+  "badge_text_colour": "FFFFFF",
+  "version": "0.1.0",
+  "dependencies": [
+    "Steamodded (>=1.0.0~BETA)"
+  ]
+}
