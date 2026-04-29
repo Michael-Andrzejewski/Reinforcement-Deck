@@ -1,20 +1,28 @@
 --[[
   Reinforcement Deck — through Phase 4
-
-  Phase 1: deck (0 jokers, no jokers in shop), per-card stack counters
-  Phase 2: enhancement stacking (Bonus/Mult/Glass/Steel/Gold/Stone/Lucky/Wild)
-           + hover-tooltip integration showing each stack
-  Phase 3: edition stacking (Foil/Holographic/Polychrome)
-  Phase 4: seal stacking (Gold/Blue/Purple) + Red Seal additivity
-           Trigger formula:  triggers(M) = count(M) + red_seal_count
-                              for enhancements & editions (count > 0).
-                             Seals fire just count times; Red Seal does NOT
-                              add to itself or other seals.
-                             Base rank chips fire (1 + red_seal_count) times.
-                             Vanilla Red Seal retrigger is disabled in this
-                              deck so all the "extra triggers" stay inside
-                              one card-scoring pass.
 --]]
+
+----------------------------------------------------------------------
+-- Diagnostic logging: writes both to lovely log via sendInfoMessage
+-- AND directly to a file under our mod folder, in case sendInfoMessage
+-- gets filtered or routed somewhere we can't see.
+----------------------------------------------------------------------
+
+local RD_LOG_PATH = nil
+local function rd_log(msg)
+    if sendInfoMessage then sendInfoMessage(msg, "ReinforcementDeck") end
+    if not RD_LOG_PATH and SMODS and SMODS.current_mod and SMODS.current_mod.path then
+        RD_LOG_PATH = SMODS.current_mod.path .. "rd_debug.log"
+    end
+    if RD_LOG_PATH and love and love.filesystem then
+        local existing = love.filesystem.getInfo(RD_LOG_PATH) and (love.filesystem.read(RD_LOG_PATH) or "") or ""
+        local stamp = os.date("%H:%M:%S")
+        love.filesystem.write(RD_LOG_PATH, existing .. "[" .. stamp .. "] " .. tostring(msg) .. "\n")
+    end
+    print("RD: " .. tostring(msg))
+end
+
+rd_log("Mod file loading at top-level")
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -122,6 +130,75 @@ SMODS.Atlas({
     py = 95,
 })
 
+-- Starting consumables list. We deliberately do NOT pass these via the
+-- deck's `config.consumables` because vanilla `Back:apply_to_run` runs
+-- the entire creation in a single tight event loop that crashes when
+-- given more than ~12 entries (and also bumps consumable_slot AFTER
+-- creating them, which tends to truncate the list). Instead we queue
+-- them as separate events from our `apply` function below.
+local RD_STARTING_CONSUMABLES = {
+    -- 2 of each enhancement-applying tarot
+    'c_chariot',    'c_chariot',     -- Steel
+    'c_devil',      'c_devil',       -- Gold
+    'c_justice',    'c_justice',     -- Glass
+    'c_tower',      'c_tower',       -- Stone
+    'c_magician',   'c_magician',    -- Lucky
+    'c_empress',    'c_empress',     -- Mult
+    'c_heirophant', 'c_heirophant',  -- Bonus (vanilla mis-spelling preserved)
+    'c_lovers',     'c_lovers',      -- Wild
+    -- 5 of each spectral for edition / seal testing
+    'c_aura',     'c_aura',     'c_aura',     'c_aura',     'c_aura',
+    'c_deja_vu',  'c_deja_vu',  'c_deja_vu',  'c_deja_vu',  'c_deja_vu',
+    'c_familiar', 'c_familiar', 'c_familiar', 'c_familiar', 'c_familiar',
+    'c_talisman', 'c_talisman', 'c_talisman', 'c_talisman', 'c_talisman',
+    'c_trance',   'c_trance',   'c_trance',   'c_trance',   'c_trance',
+}
+
+-- Build a one-shot event that creates the next consumable in the list,
+-- so each emplace finishes before the next starts.
+local function rd_queue_consumable(idx)
+    local key = RD_STARTING_CONSUMABLES[idx]
+    if not key then
+        rd_log("finished queueing all starting consumables")
+        return
+    end
+    G.E_MANAGER:add_event(Event({
+        trigger = 'after',
+        delay = 0.05,
+        func = function()
+            local ok, err = pcall(function()
+                local center = G.P_CENTERS[key]
+                if not center then
+                    rd_log(("consumable %d/%d: no center for %s"):format(idx, #RD_STARTING_CONSUMABLES, tostring(key)))
+                    return
+                end
+                local card_type = (center.set == 'Spectral' and 'Spectral')
+                                  or (center.set == 'Planet' and 'Planet')
+                                  or 'Tarot'
+                local before_n = G.consumeables and #G.consumeables.cards or -1
+                local cap = G.consumeables and G.consumeables.config and G.consumeables.config.card_limit or -1
+                local card = create_card(card_type, G.consumeables, nil, nil, nil, nil, key, 'rdstart')
+                if card then
+                    card:add_to_deck()
+                    G.consumeables:emplace(card)
+                    rd_log(("consumable %d/%d: created %s (set=%s) cards=%d->%d cap=%d"):format(
+                        idx, #RD_STARTING_CONSUMABLES, key, center.set, before_n, #G.consumeables.cards, cap
+                    ))
+                else
+                    rd_log(("consumable %d/%d: create_card returned nil for %s (cards=%d cap=%d)"):format(
+                        idx, #RD_STARTING_CONSUMABLES, key, before_n, cap
+                    ))
+                end
+            end)
+            if not ok then
+                rd_log(("consumable %d crash: %s"):format(idx, tostring(err)))
+            end
+            rd_queue_consumable(idx + 1)
+            return true
+        end,
+    }))
+end
+
 SMODS.Back({
     key = 'reinforcement',
     name = 'Reinforcement Deck',
@@ -130,28 +207,31 @@ SMODS.Back({
     config = {
         dollars = 196,            -- $200 starting (testing)
         joker_slot = -5,          -- 0 joker slots
-        consumable_slot = 39,     -- room for 41 starting consumables (default 2 + 39 = 41)
-        consumables = {
-            -- 2 of each enhancement-applying tarot
-            'c_chariot',    'c_chariot',     -- Steel
-            'c_devil',      'c_devil',       -- Gold
-            'c_justice',    'c_justice',     -- Glass
-            'c_tower',      'c_tower',       -- Stone
-            'c_magician',   'c_magician',    -- Lucky
-            'c_empress',    'c_empress',     -- Mult
-            'c_hierophant', 'c_hierophant',  -- Bonus
-            'c_lovers',     'c_lovers',      -- Wild
-            -- 5 of each spectral for Phase 3 / 4 testing
-            'c_aura', 'c_aura', 'c_aura', 'c_aura', 'c_aura',                    -- random Edition
-            'c_deja_vu', 'c_deja_vu', 'c_deja_vu', 'c_deja_vu', 'c_deja_vu',     -- Red Seal
-            'c_familiar', 'c_familiar', 'c_familiar', 'c_familiar', 'c_familiar',-- 3 random face cards
-            'c_talisman', 'c_talisman', 'c_talisman', 'c_talisman', 'c_talisman',-- Gold Seal
-            'c_trance', 'c_trance', 'c_trance', 'c_trance', 'c_trance',          -- Blue Seal
-        },
+        consumable_slot = 39,     -- room for 41 starting consumables
     },
     unlocked = true,
     apply = function(self)
+        rd_log("apply() called")
         G.GAME.joker_rate = 0
+        G.E_MANAGER:add_event(Event({
+            trigger = 'after',
+            delay = 0.1,
+            func = function()
+                rd_log(("apply event fired. G.consumeables=%s"):format(tostring(G.consumeables ~= nil)))
+                if G.consumeables and G.consumeables.config then
+                    local desired = #RD_STARTING_CONSUMABLES + 2
+                    G.consumeables.config.card_limit = math.max(
+                        G.consumeables.config.card_limit or 0,
+                        desired
+                    )
+                    rd_log(("set card_limit -> %d (#RD_STARTING_CONSUMABLES=%d)"):format(
+                        G.consumeables.config.card_limit, #RD_STARTING_CONSUMABLES
+                    ))
+                end
+                rd_queue_consumable(1)
+                return true
+            end,
+        }))
     end,
 })
 
@@ -173,16 +253,75 @@ function Card:set_ability(center, initial, delay_sprites)
     return res
 end
 
+-- Steamodded REPLACES Card:set_edition entirely (see SMODS src/overrides.lua).
+-- The replacement accepts THREE different argument formats:
+--   1. string "e_holo" (or any "e_<key>" center key)
+--   2. table with `.type` field (e.g. {type='holo'})
+--   3. table with one boolean flag set (e.g. {holo=true})
+-- Our increment logic must normalize all three to a single edition_type.
+local function rd_normalize_edition(edition)
+    if not edition then return nil end
+    if type(edition) == 'string' then
+        if edition:sub(1, 2) == 'e_' then return edition:sub(3) end
+        return edition
+    elseif type(edition) == 'table' then
+        if edition.type then return edition.type end
+        for k, v in pairs(edition) do
+            if v then return k end
+        end
+    end
+    return nil
+end
+
+-- Map normalized type -> rd.edit field name
+local RD_EDITION_FIELD_MAP = {
+    foil       = 'foil',
+    holo       = 'holographic',
+    holographic = 'holographic',
+    polychrome = 'polychrome',
+    -- 'negative' is intentionally absent: this deck doesn't track it.
+}
+
 local rd_orig_set_edition = Card.set_edition
-function Card:set_edition(edition, immediate, silent)
-    if rd_active() and edition and not silent then
+function Card:set_edition(edition, immediate, silent, delay)
+    local etype = rd_normalize_edition(edition)
+    rd_log(("set_edition: rd_active=%s normalized=%s silent=%s immediate=%s")
+        :format(tostring(rd_active()), tostring(etype), tostring(silent), tostring(immediate)))
+
+    if rd_active() and etype and RD_EDITION_FIELD_MAP[etype] then
         rd_ensure_stacks(self)
         local s = self.ability.rd_stacks.edit
-        if edition.holo       then s.holographic = s.holographic + 1 end
-        if edition.foil       then s.foil        = s.foil        + 1 end
-        if edition.polychrome then s.polychrome  = s.polychrome  + 1 end
+        local field = RD_EDITION_FIELD_MAP[etype]
+        local before = s[field]
+        s[field] = s[field] + 1
+        rd_log(("set_edition incremented %s: %d -> %d"):format(field, before, s[field]))
     end
-    return rd_orig_set_edition(self, edition, immediate, silent)
+    local res = rd_orig_set_edition(self, edition, immediate, silent, delay)
+    return res
+end
+
+-- Aura's vanilla can_use_consumeable check blocks usage on cards that
+-- already have an edition. Override that for our deck so editions can
+-- truly stack. We replicate the same gating as vanilla but drop the
+-- `not G.hand.highlighted[1].edition` clause.
+local rd_orig_can_use = Card.can_use_consumeable
+function Card:can_use_consumeable(any_state, skip_check)
+    if rd_active() and self.ability and self.ability.name == 'Aura' then
+        if not skip_check and ((G.play and #G.play.cards > 0) or
+            (G.CONTROLLER.locked) or
+            (G.GAME.STOP_USE and G.GAME.STOP_USE > 0)) then
+            return false
+        end
+        -- Vanilla: entry when NOT in HAND_PLAYED/DRAW_TO_HAND/PLAY_TAROT, OR any_state.
+        if (G.STATE ~= G.STATES.HAND_PLAYED
+            and G.STATE ~= G.STATES.DRAW_TO_HAND
+            and G.STATE ~= G.STATES.PLAY_TAROT)
+            or any_state then
+            return G.hand and (#G.hand.highlighted == 1) and G.hand.highlighted[1] ~= nil or false
+        end
+        return false
+    end
+    return rd_orig_can_use(self, any_state, skip_check)
 end
 
 local rd_orig_set_seal = Card.set_seal
@@ -327,25 +466,38 @@ end
 -- Scoring: editions  (Holo + Foil + Polychrome)
 ----------------------------------------------------------------------
 
-local rd_orig_get_edition = Card.get_edition
-function Card:get_edition()
-    if not rd_active() then return rd_orig_get_edition(self) end
-    if self.debuff then return end
+-- Steamodded's scoring pipeline calls Card:calculate_edition(context),
+-- not Card:get_edition. The default calculate_edition delegates to the
+-- edition center's `calculate` function, which reads `card.edition.chips`
+-- (or .mult / .x_mult) for a SINGLE edition. We override calculate_edition
+-- to roll up our stacked edition counters into a single combined effect
+-- table (chips + mult + x_mult), so all three contributions apply in one
+-- scoring pass.
+local rd_orig_calc_edition = Card.calculate_edition
+function Card:calculate_edition(context)
+    if not rd_active() then return rd_orig_calc_edition(self, context) end
     rd_ensure_stacks(self)
-    local s = self.ability.rd_stacks
     local foil_trig = rd_triggers(self, 'edit', 'foil')
     local holo_trig = rd_triggers(self, 'edit', 'holographic')
     local poly_trig = rd_triggers(self, 'edit', 'polychrome')
 
     if foil_trig <= 0 and holo_trig <= 0 and poly_trig <= 0 then
-        -- No edition stacks recorded -> let vanilla (or no edition) handle it
-        return rd_orig_get_edition(self)
+        return rd_orig_calc_edition(self, context)
     end
 
+    -- Match vanilla edition calculate() context gating
+    local active = context and (context.pre_joker
+        or (context.main_scoring and context.cardarea == G.play))
+    if not active then return rd_orig_calc_edition(self, context) end
+
     local ret = { card = self }
-    if holo_trig > 0 then ret.mult_mod   = RD_BASE.holo_mult * holo_trig end
-    if foil_trig > 0 then ret.chip_mod   = RD_BASE.foil_chips * foil_trig end
-    if poly_trig > 0 then ret.x_mult_mod = RD_BASE.poly_xmult ^ poly_trig end
+    if foil_trig > 0 then ret.chips  = RD_BASE.foil_chips * foil_trig end
+    if holo_trig > 0 then ret.mult   = RD_BASE.holo_mult  * holo_trig end
+    if poly_trig > 0 then ret.x_mult = RD_BASE.poly_xmult ^ poly_trig end
+    rd_log(("calculate_edition: foil=%d holo=%d poly=%d -> chips=%s mult=%s x_mult=%s"):format(
+        foil_trig, holo_trig, poly_trig,
+        tostring(ret.chips), tostring(ret.mult), tostring(ret.x_mult)
+    ))
     return ret
 end
 
@@ -477,40 +629,65 @@ local RD_TOOLTIP_ORDER = {
     { kind = 'seal', field = 'purple',        label = 'Purple Seal',  colour_key = 'PURPLE' },
 }
 
-local function rd_build_stack_rows(card)
-    if not card or not card.ability or not card.ability.rd_stacks then return nil end
+-- IMPORTANT: result.main entries are flat arrays of inline UIEs (a row
+-- being one localized line). Each entry looks like:
+--     { {n=G.UIT.T, config={text=..., scale=..., colour=...}}, ... }
+-- The outer code wraps these in a UIT.R row at draw time. Inserting a
+-- full {n=R, nodes=...} UIE here would crash UIBox construction because
+-- pairs() on it yields the named fields ("n","config") as if they were
+-- children. We therefore produce flat lines.
+local function rd_build_stack_lines(card)
+    if not card or not card.ability or not card.ability.rd_stacks then
+        rd_log("build_stack_lines: no rd_stacks on hovered card")
+        return nil
+    end
     local s = card.ability.rd_stacks
-    local rows = {}
+    rd_log(("build_stack_lines: enh.steel=%d enh.glass=%d edit.foil=%d edit.holo=%d edit.poly=%d seal.red=%d")
+        :format(s.enh.steel or 0, s.enh.glass or 0,
+                s.edit.foil or 0, s.edit.holographic or 0, s.edit.polychrome or 0,
+                s.seal.red or 0))
+    local lines = {}
     for _, entry in ipairs(RD_TOOLTIP_ORDER) do
         local v = s[entry.kind] and s[entry.kind][entry.field] or 0
         if v and v > 0 then
             local colour = G.C[entry.colour_key] or G.C.WHITE
-            rows[#rows + 1] = {
-                n = G.UIT.R, config = { align = "cm", padding = 0 },
-                nodes = {
-                    { n = G.UIT.T, config = { text = tostring(v) .. "x ", scale = 0.32, colour = G.C.WHITE } },
-                    { n = G.UIT.T, config = { text = entry.label,         scale = 0.32, colour = colour    } },
-                },
+            local text = tostring(v) .. "x " .. entry.label
+            lines[#lines + 1] = {
+                { n = G.UIT.T, config = { text = text, scale = 0.34, colour = colour } },
             }
         end
     end
-    if #rows == 0 then return nil end
-    table.insert(rows, 1, {
-        n = G.UIT.R, config = { align = "cm", padding = 0.02 },
-        nodes = {
-            { n = G.UIT.T, config = { text = "Reinforcements:", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } },
-        },
+    if #lines == 0 then return nil end
+    table.insert(lines, 1, {
+        { n = G.UIT.T, config = { text = "Reinforcements:", scale = 0.34, colour = G.C.WHITE } },
     })
-    return rows
+    return lines
 end
 
 local rd_orig_gen_card_ui = generate_card_ui
-function generate_card_ui(_c, full_UI_table, specific_vars, card_type, badges, hide_desc, main_start, main_end)
-    local result = rd_orig_gen_card_ui(_c, full_UI_table, specific_vars, card_type, badges, hide_desc, main_start, main_end)
-    if rd_active() and result and (card_type == 'Default' or card_type == 'Enhanced') and G.RD_HOVER_CARD then
-        local rows = rd_build_stack_rows(G.RD_HOVER_CARD)
-        if rows and result.main then
-            for _, row in ipairs(rows) do table.insert(result.main, row) end
+function generate_card_ui(...)
+    -- Forward ALL args (Steamodded passes a 9th `card` arg now).
+    local args = { ... }
+    local card_type = args[4]
+    local card = args[9]
+    local result = rd_orig_gen_card_ui(...)
+
+    if rd_active() and result and (card_type == 'Default' or card_type == 'Enhanced') then
+        local target = card or G.RD_HOVER_CARD
+        if target then
+            -- Wrap injection in pcall so a tooltip bug never crashes the
+            -- game during a run.
+            local ok, err = pcall(function()
+                local lines = rd_build_stack_lines(target)
+                if lines and result.main then
+                    for _, line in ipairs(lines) do
+                        table.insert(result.main, line)
+                    end
+                end
+            end)
+            if not ok then
+                sendWarnMessage("RD tooltip injection failed: " .. tostring(err), "ReinforcementDeck")
+            end
         end
     end
     return result
