@@ -142,6 +142,18 @@ local function rd_triggers(card, kind, field)
     return c + (s.seal.red or 0)
 end
 
+-- Stone is special: when Stone is the *most recent* enhancement applied
+-- (i.e. it's the visually-active enhancement), the card loses its rank
+-- chips and suit identity, like vanilla. When Stone has since been
+-- overridden by another enhancement (the user has, e.g., Towered then
+-- Chariot'd a card), it acts only as a +50 chips bonus per stack and
+-- the card behaves normally for hand evaluation. Same idea could be
+-- extended to Wild later if desired, but per user spec Wild is
+-- always-active regardless of override.
+local function rd_stone_is_active(card)
+    return card and card.config and card.config.center_key == 'm_stone'
+end
+
 ----------------------------------------------------------------------
 -- Atlas + Deck
 ----------------------------------------------------------------------
@@ -285,26 +297,27 @@ function Card:set_seal(_seal, silent, immediate)
     return rd_orig_set_seal(self, _seal, silent, immediate)
 end
 
--- Wild and Stone enhancements affect suit-matching for hand evaluation.
--- Vanilla Card:is_suit reads `ability.name == "Wild Card"` and
--- `ability.effect == "Stone Card"`, but those strings get overwritten
--- when a different enhancement is applied later (e.g. Hierophant on a
--- Wild card sets effect to "Bonus Card"). Drive the check off our
--- rd_stacks counters instead so wild/stone status survives stacking.
+-- Wild and Stone enhancements affect suit-matching. Vanilla checks
+-- `ability.name == "Wild Card"` and `ability.effect == "Stone Card"`,
+-- both of which get overwritten when a later enhancement is applied.
+-- We drive Wild off the rd_stacks counter so it always survives stacks.
+-- Stone, per spec, only suppresses suit identity when it's the most
+-- recent enhancement applied; once overridden, Stone falls back to a
+-- pure +50 chip bonus and the card matches normally.
 local rd_orig_is_suit = Card.is_suit
 function Card:is_suit(suit, bypass_debuff, flush_calc)
     if not rd_active() then return rd_orig_is_suit(self, suit, bypass_debuff, flush_calc) end
     rd_ensure_stacks(self)
     local s = self.ability.rd_stacks
-    local stone_present = s and (s.enh.stone or 0) > 0
-    local wild_present  = s and (s.enh.wild  or 0) > 0
+    local wild_present = s and (s.enh.wild or 0) > 0
+    local stone_active = rd_stone_is_active(self)
 
     if flush_calc then
-        if stone_present then return false end
+        if stone_active then return false end
         if wild_present and not self.debuff then return true end
     else
         if self.debuff and not bypass_debuff then return end
-        if stone_present then return false end
+        if stone_active then return false end
         if wild_present then return true end
     end
     -- Fall through to vanilla for Smeared Joker handling and base.suit match.
@@ -324,7 +337,10 @@ end
 -- identity for hand-type matching.
 ----------------------------------------------------------------------
 
--- Bonus + Stone -> chips, plus base rank chips with Red-Seal additivity
+-- Bonus + Stone -> chips, plus base rank chips with Red-Seal additivity.
+-- Stone, per spec, only suppresses base rank scoring when it's the most
+-- recently applied enhancement; otherwise it acts as +50 chips per stack
+-- and rank chips still apply.
 local rd_orig_get_chip_bonus = Card.get_chip_bonus
 function Card:get_chip_bonus()
     if not rd_active() then return rd_orig_get_chip_bonus(self) end
@@ -334,15 +350,21 @@ function Card:get_chip_bonus()
     local red = s.seal.red or 0
 
     local total = 0
+    local stone_active = rd_stone_is_active(self)
 
-    local stone_trig = rd_triggers(self, 'enh', 'stone')
-    if stone_trig > 0 then
-        total = total + rd_constant('m_stone', 'bonus', 50) * stone_trig
-    else
-        -- Base rank chips fire (1 + red_seal_count) times
+    -- Base rank chips: only suppressed when Stone is the active (most
+    -- recent) enhancement. Otherwise they fire (1 + red_seal_count) times.
+    if not stone_active then
         total = total + (self.base.nominal or 0) * (1 + red)
     end
 
+    -- Stone chips per stack always apply (50 per stack + red seal).
+    local stone_trig = rd_triggers(self, 'enh', 'stone')
+    if stone_trig > 0 then
+        total = total + rd_constant('m_stone', 'bonus', 50) * stone_trig
+    end
+
+    -- Bonus chips per stack
     local bonus_trig = rd_triggers(self, 'enh', 'bonus')
     if bonus_trig > 0 then
         total = total + rd_constant('m_bonus', 'bonus', 30) * bonus_trig
