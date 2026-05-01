@@ -783,11 +783,11 @@ local rd_hover_card = nil
 local function rd_wheel_description()
     return {
         {
-            { n = G.UIT.T, config = { text = "Adds a random ", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } },
+            { n = G.UIT.T, config = { text = "Adds a random ", scale = 0.32, colour = G.C.UI.TEXT_DARK } },
             { n = G.UIT.T, config = { text = "Edition",         scale = 0.32, colour = G.C.DARK_EDITION } },
         },
         {
-            { n = G.UIT.T, config = { text = "to a random card in hand", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } },
+            { n = G.UIT.T, config = { text = "to a random card in hand", scale = 0.32, colour = G.C.UI.TEXT_DARK } },
         },
     }
 end
