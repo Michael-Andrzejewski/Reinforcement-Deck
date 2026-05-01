@@ -204,6 +204,31 @@ local function rd_queue_consumable(idx)
     }))
 end
 
+-- Run-level settings that need to persist across both new and loaded
+-- runs: joker_rate=0, ban Buffoon packs and useless Joker-dependent
+-- tarots, and short-circuit the forced first-shop Buffoon. apply() is
+-- only called by vanilla on new runs (Game:start_run skips
+-- Back:apply_to_run when loading a save), so we ALSO call this from
+-- our Game:start_run hook below to cover continued runs.
+local RD_BANNED_KEYS = {
+    -- Buffoon packs (Joker packs)
+    'p_buffoon_normal_1', 'p_buffoon_normal_2',
+    'p_buffoon_jumbo_1',  'p_buffoon_mega_1',
+    -- Tarots that require / target Jokers (useless in this deck)
+    'c_judgement',  -- creates a random Joker
+    'c_temperance', -- pays out based on held Jokers' sell value
+}
+
+local function rd_apply_persistent_settings()
+    if not (G and G.GAME) then return end
+    G.GAME.joker_rate = 0
+    G.GAME.banned_keys = G.GAME.banned_keys or {}
+    for _, k in ipairs(RD_BANNED_KEYS) do
+        G.GAME.banned_keys[k] = true
+    end
+    G.GAME.first_shop_buffoon = true
+end
+
 SMODS.Back({
     key = 'reinforcement',
     name = 'Reinforcement Deck',
@@ -218,25 +243,9 @@ SMODS.Back({
     },
     unlocked = true,
     apply = function(self)
-        G.GAME.joker_rate = 0
-
-        -- Ban Buffoon packs (Joker packs) and useless Joker-dependent
-        -- tarots from any pool (shop, packs, generated). vanilla create_card
-        -- and get_pack both honor G.GAME.banned_keys.
-        G.GAME.banned_keys = G.GAME.banned_keys or {}
-        for _, k in ipairs({
-            -- Buffoon packs (jokers)
-            'p_buffoon_normal_1', 'p_buffoon_normal_2',
-            'p_buffoon_jumbo_1',  'p_buffoon_mega_1',
-            -- Tarots that require / target Jokers (useless in this deck)
-            'c_judgement',  -- creates a random Joker
-            'c_temperance', -- pays out based on held Jokers' sell value
-        }) do
-            G.GAME.banned_keys[k] = true
-        end
-        -- Skip vanilla's forced first-Buffoon shop appearance
-        G.GAME.first_shop_buffoon = true
-
+        rd_apply_persistent_settings()
+        -- Starting consumable spawn (event-chained). Only fires on a
+        -- new run; loaded runs already have their starting consumables.
         G.E_MANAGER:add_event(Event({
             trigger = 'after',
             delay = 0.1,
@@ -253,6 +262,21 @@ SMODS.Back({
         }))
     end,
 })
+
+-- Hook Game:start_run so persistent settings (joker_rate, banned_keys,
+-- first_shop_buffoon) are re-applied on continued runs as well as new
+-- ones. Vanilla only calls Back:apply_to_run for fresh runs, so a save
+-- created before these settings existed (or a save where they got
+-- cleared) would otherwise still let Buffoon packs / banned tarots
+-- appear in the shop.
+local rd_orig_start_run = Game.start_run
+function Game:start_run(args)
+    local res = rd_orig_start_run(self, args)
+    if rd_active() then
+        rd_apply_persistent_settings()
+    end
+    return res
+end
 
 ----------------------------------------------------------------------
 -- Apply hooks: enhancement / edition / seal -> increment counter
