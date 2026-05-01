@@ -220,13 +220,17 @@ SMODS.Back({
     apply = function(self)
         G.GAME.joker_rate = 0
 
-        -- Ban Buffoon packs (which contain Jokers) from the shop.
-        -- vanilla get_pack() honors G.GAME.banned_keys, and there's a
-        -- forced "first shop" Buffoon trigger we need to short-circuit.
+        -- Ban Buffoon packs (Joker packs) and useless Joker-dependent
+        -- tarots from any pool (shop, packs, generated). vanilla create_card
+        -- and get_pack both honor G.GAME.banned_keys.
         G.GAME.banned_keys = G.GAME.banned_keys or {}
         for _, k in ipairs({
+            -- Buffoon packs (jokers)
             'p_buffoon_normal_1', 'p_buffoon_normal_2',
             'p_buffoon_jumbo_1',  'p_buffoon_mega_1',
+            -- Tarots that require / target Jokers (useless in this deck)
+            'c_judgement',  -- creates a random Joker
+            'c_temperance', -- pays out based on held Jokers' sell value
         }) do
             G.GAME.banned_keys[k] = true
         end
@@ -283,27 +287,73 @@ function Card:set_edition(edition, immediate, silent, delay)
     return rd_orig_set_edition(self, edition, immediate, silent, delay)
 end
 
--- Aura's vanilla can_use_consumeable check blocks usage on cards that
--- already have an edition. Override that for our deck so editions can
--- truly stack. We replicate the same gating as vanilla but drop the
--- `not G.hand.highlighted[1].edition` clause.
-local rd_orig_can_use = Card.can_use_consumeable
-function Card:can_use_consumeable(any_state, skip_check)
-    if rd_active() and self.ability and self.ability.name == 'Aura' then
-        if not skip_check and ((G.play and #G.play.cards > 0) or
-            G.CONTROLLER.locked or
-            (G.GAME.STOP_USE and G.GAME.STOP_USE > 0)) then
-            return false
-        end
-        if (G.STATE ~= G.STATES.HAND_PLAYED
-            and G.STATE ~= G.STATES.DRAW_TO_HAND
-            and G.STATE ~= G.STATES.PLAY_TAROT)
-            or any_state then
-            return G.hand and (#G.hand.highlighted == 1) and G.hand.highlighted[1] ~= nil or false
-        end
+-- Reinforcement Deck overrides for two consumables:
+--   * Aura: drop the "card has no edition" gate so editions can stack.
+--   * The Wheel of Fortune: vanilla requires an editionless Joker, but
+--     this deck has no Jokers. Repurpose Wheel to apply a random
+--     non-negative edition to a highlighted hand card (like Aura), so
+--     it has a meaningful effect.
+local function rd_basic_consumable_gate(any_state, skip_check)
+    if not skip_check and ((G.play and #G.play.cards > 0) or
+        G.CONTROLLER.locked or
+        (G.GAME.STOP_USE and G.GAME.STOP_USE > 0)) then
         return false
     end
+    if (G.STATE ~= G.STATES.HAND_PLAYED
+        and G.STATE ~= G.STATES.DRAW_TO_HAND
+        and G.STATE ~= G.STATES.PLAY_TAROT)
+        or any_state then
+        return G.hand and (#G.hand.highlighted == 1) and G.hand.highlighted[1] ~= nil or false
+    end
+    return false
+end
+
+local rd_orig_can_use = Card.can_use_consumeable
+function Card:can_use_consumeable(any_state, skip_check)
+    if rd_active() and self.ability then
+        if self.ability.name == 'Aura' or self.ability.name == 'The Wheel of Fortune' then
+            return rd_basic_consumable_gate(any_state, skip_check)
+        end
+    end
     return rd_orig_can_use(self, any_state, skip_check)
+end
+
+-- Override Wheel of Fortune's use logic so it applies a random
+-- non-negative edition (Foil / Holographic / Polychrome) to the
+-- highlighted hand card. We short-circuit BEFORE vanilla's Joker-
+-- targeting branch runs.
+local rd_orig_use_consumeable = Card.use_consumeable
+function Card:use_consumeable(area, copier)
+    if rd_active() and self.ability and self.ability.name == 'The Wheel of Fortune' then
+        stop_use()
+        if not copier then set_consumeable_usage(self) end
+        if self.debuff then return nil end
+        local used_tarot = copier or self
+        local target = G.hand and G.hand.highlighted and G.hand.highlighted[1]
+        if not target then return nil end
+
+        G.E_MANAGER:add_event(Event({
+            trigger = 'after',
+            delay = 0.4,
+            func = function()
+                local edition = poll_edition('rd_wheel', nil, true, true)
+                target:set_edition(edition, true)
+                used_tarot:juice_up(0.3, 0.5)
+                return true
+            end,
+        }))
+        delay(0.5)
+        G.E_MANAGER:add_event(Event({
+            trigger = 'after',
+            delay = 0.2,
+            func = function()
+                G.hand:unhighlight_all()
+                return true
+            end,
+        }))
+        return
+    end
+    return rd_orig_use_consumeable(self, area, copier)
 end
 
 -- Same silent=true skip as set_edition above. Vanilla copy_card calls
