@@ -291,9 +291,9 @@ end
 --   * Aura: drop the "card has no edition" gate so editions can stack.
 --   * The Wheel of Fortune: vanilla requires an editionless Joker, but
 --     this deck has no Jokers. Repurpose Wheel to apply a random
---     non-negative edition to a highlighted hand card (like Aura), so
---     it has a meaningful effect.
-local function rd_basic_consumable_gate(any_state, skip_check)
+--     edition to a RANDOM hand card (no highlight needed), making it
+--     a "spray" effect that's strictly weaker than Aura's targeted use.
+local function rd_aura_gate(any_state, skip_check)
     if not skip_check and ((G.play and #G.play.cards > 0) or
         G.CONTROLLER.locked or
         (G.GAME.STOP_USE and G.GAME.STOP_USE > 0)) then
@@ -308,20 +308,38 @@ local function rd_basic_consumable_gate(any_state, skip_check)
     return false
 end
 
+local function rd_wheel_gate(any_state, skip_check)
+    -- Wheel doesn't need a highlighted card - just any card in hand.
+    if not skip_check and ((G.play and #G.play.cards > 0) or
+        G.CONTROLLER.locked or
+        (G.GAME.STOP_USE and G.GAME.STOP_USE > 0)) then
+        return false
+    end
+    if (G.STATE ~= G.STATES.HAND_PLAYED
+        and G.STATE ~= G.STATES.DRAW_TO_HAND
+        and G.STATE ~= G.STATES.PLAY_TAROT)
+        or any_state then
+        return G.hand and G.hand.cards and #G.hand.cards > 0 or false
+    end
+    return false
+end
+
 local rd_orig_can_use = Card.can_use_consumeable
 function Card:can_use_consumeable(any_state, skip_check)
     if rd_active() and self.ability then
-        if self.ability.name == 'Aura' or self.ability.name == 'The Wheel of Fortune' then
-            return rd_basic_consumable_gate(any_state, skip_check)
+        if self.ability.name == 'Aura' then
+            return rd_aura_gate(any_state, skip_check)
+        end
+        if self.ability.name == 'The Wheel of Fortune' then
+            return rd_wheel_gate(any_state, skip_check)
         end
     end
     return rd_orig_can_use(self, any_state, skip_check)
 end
 
 -- Override Wheel of Fortune's use logic so it applies a random
--- non-negative edition (Foil / Holographic / Polychrome) to the
--- highlighted hand card. We short-circuit BEFORE vanilla's Joker-
--- targeting branch runs.
+-- non-negative edition (Foil / Holographic / Polychrome) to a RANDOM
+-- card held in hand. Short-circuits BEFORE vanilla's Joker branch.
 local rd_orig_use_consumeable = Card.use_consumeable
 function Card:use_consumeable(area, copier)
     if rd_active() and self.ability and self.ability.name == 'The Wheel of Fortune' then
@@ -329,28 +347,23 @@ function Card:use_consumeable(area, copier)
         if not copier then set_consumeable_usage(self) end
         if self.debuff then return nil end
         local used_tarot = copier or self
-        local target = G.hand and G.hand.highlighted and G.hand.highlighted[1]
-        if not target then return nil end
 
         G.E_MANAGER:add_event(Event({
             trigger = 'after',
             delay = 0.4,
             func = function()
-                local edition = poll_edition('rd_wheel', nil, true, true)
-                target:set_edition(edition, true)
+                if G.hand and G.hand.cards and #G.hand.cards > 0 then
+                    local target = pseudorandom_element(G.hand.cards, pseudoseed('rd_wheel_target'))
+                    if target then
+                        local edition = poll_edition('rd_wheel', nil, true, true)
+                        target:set_edition(edition, true)
+                    end
+                end
                 used_tarot:juice_up(0.3, 0.5)
                 return true
             end,
         }))
         delay(0.5)
-        G.E_MANAGER:add_event(Event({
-            trigger = 'after',
-            delay = 0.2,
-            func = function()
-                G.hand:unhighlight_all()
-                return true
-            end,
-        }))
         return
     end
     return rd_orig_use_consumeable(self, area, copier)
@@ -740,15 +753,43 @@ end
 -- when generate_card_ui isn't given the card explicitly.
 local rd_hover_card = nil
 
+-- Build the override description for Wheel of Fortune in this deck.
+-- result.main entries are flat arrays of inline text UIEs (not full
+-- UIT.R rows; outer renderer wraps them).
+local function rd_wheel_description()
+    return {
+        {
+            { n = G.UIT.T, config = { text = "Adds a random ", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } },
+            { n = G.UIT.T, config = { text = "Edition",         scale = 0.32, colour = G.C.DARK_EDITION } },
+        },
+        {
+            { n = G.UIT.T, config = { text = "to a random card in hand", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } },
+        },
+    }
+end
+
 local rd_orig_gen_card_ui = generate_card_ui
 function generate_card_ui(...)
     -- Forward ALL args (Steamodded passes a 9th `card` arg).
     local args = { ... }
+    local _c = args[1]
     local card_type = args[4]
     local card = args[9]
     local result = rd_orig_gen_card_ui(...)
 
-    if rd_active() and result and (card_type == 'Default' or card_type == 'Enhanced') then
+    if not rd_active() or not result then return result end
+
+    -- Override Wheel of Fortune's description while in this deck so
+    -- it accurately reflects the repurposed behavior.
+    if _c and _c.key == 'c_wheel_of_fortune' and result.main then
+        local ok, err = pcall(function()
+            result.main = rd_wheel_description()
+        end)
+        if not ok then rd_log("wheel description override failed: " .. tostring(err)) end
+    end
+
+    -- Stack-counter rows for playing cards.
+    if (card_type == 'Default' or card_type == 'Enhanced') then
         local target = card or rd_hover_card
         if target then
             local ok, err = pcall(function()
