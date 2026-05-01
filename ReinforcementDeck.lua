@@ -219,6 +219,20 @@ SMODS.Back({
     unlocked = true,
     apply = function(self)
         G.GAME.joker_rate = 0
+
+        -- Ban Buffoon packs (which contain Jokers) from the shop.
+        -- vanilla get_pack() honors G.GAME.banned_keys, and there's a
+        -- forced "first shop" Buffoon trigger we need to short-circuit.
+        G.GAME.banned_keys = G.GAME.banned_keys or {}
+        for _, k in ipairs({
+            'p_buffoon_normal_1', 'p_buffoon_normal_2',
+            'p_buffoon_jumbo_1',  'p_buffoon_mega_1',
+        }) do
+            G.GAME.banned_keys[k] = true
+        end
+        -- Skip vanilla's forced first-Buffoon shop appearance
+        G.GAME.first_shop_buffoon = true
+
         G.E_MANAGER:add_event(Event({
             trigger = 'after',
             delay = 0.1,
@@ -253,10 +267,15 @@ function Card:set_ability(center, initial, delay_sprites)
     return res
 end
 
+-- IMPORTANT: skip increment when silent=true. Vanilla uses silent=true
+-- for internal state-replication calls (copy_card after duplicating
+-- ability table, UI preview rendering, challenge starting hands, etc.)
+-- where the edition is already accounted for in the ability table.
+-- Skipping silent=true prevents double-incrementing.
 local rd_orig_set_edition = Card.set_edition
 function Card:set_edition(edition, immediate, silent, delay)
     local etype = rd_normalize_edition(edition)
-    if rd_active() and etype and RD_EDITION_FIELD_MAP[etype] then
+    if rd_active() and not silent and etype and RD_EDITION_FIELD_MAP[etype] then
         rd_ensure_stacks(self)
         local field = RD_EDITION_FIELD_MAP[etype]
         self.ability.rd_stacks.edit[field] = self.ability.rd_stacks.edit[field] + 1
@@ -287,9 +306,13 @@ function Card:can_use_consumeable(any_state, skip_check)
     return rd_orig_can_use(self, any_state, skip_check)
 end
 
+-- Same silent=true skip as set_edition above. Vanilla copy_card calls
+-- new_card:set_seal(other.seal, true) after copying the ability table,
+-- which already contains rd_stacks. Without this guard the destination
+-- ends up with seal_count = source + 1.
 local rd_orig_set_seal = Card.set_seal
 function Card:set_seal(_seal, silent, immediate)
-    if rd_active() and _seal and RD_SEAL_KEY_MAP[_seal] then
+    if rd_active() and not silent and _seal and RD_SEAL_KEY_MAP[_seal] then
         rd_ensure_stacks(self)
         local field = RD_SEAL_KEY_MAP[_seal]
         self.ability.rd_stacks.seal[field] = self.ability.rd_stacks.seal[field] + 1
