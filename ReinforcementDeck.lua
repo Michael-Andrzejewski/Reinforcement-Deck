@@ -153,28 +153,10 @@ SMODS.Atlas({
     py   = 95,
 })
 
--- Starting consumables list. We deliberately do NOT pass these via
--- `config.consumables` because vanilla `Back:apply_to_run` runs the
--- entire creation in a single tight event loop that crashes when given
--- more than ~12 entries. We queue them as separate events instead.
---
--- TESTING AID: this is far too many starting consumables for normal
--- play. Trim/remove for release.
-local RD_STARTING_CONSUMABLES = {
-    'c_chariot',    'c_chariot',     -- Steel
-    'c_devil',      'c_devil',       -- Gold
-    'c_justice',    'c_justice',     -- Glass
-    'c_tower',      'c_tower',       -- Stone
-    'c_magician',   'c_magician',    -- Lucky
-    'c_empress',    'c_empress',     -- Mult
-    'c_heirophant', 'c_heirophant',  -- Bonus (vanilla mis-spelling preserved)
-    'c_lovers',     'c_lovers',      -- Wild
-    'c_aura',     'c_aura',     'c_aura',     'c_aura',     'c_aura',
-    'c_deja_vu',  'c_deja_vu',  'c_deja_vu',  'c_deja_vu',  'c_deja_vu',
-    'c_familiar', 'c_familiar', 'c_familiar', 'c_familiar', 'c_familiar',
-    'c_talisman', 'c_talisman', 'c_talisman', 'c_talisman', 'c_talisman',
-    'c_trance',   'c_trance',   'c_trance',   'c_trance',   'c_trance',
-}
+-- Starting consumables list. Empty for normal play. Add entries here
+-- (e.g. 'c_chariot', 'c_aura', etc.) to give the player extras at run
+-- start; the queue handles vanilla's apply_to_run race condition.
+local RD_STARTING_CONSUMABLES = {}
 
 local function rd_queue_consumable(idx)
     local key = RD_STARTING_CONSUMABLES[idx]
@@ -216,10 +198,11 @@ SMODS.Back({
     atlas = 'rd_decks',
     pos = { x = 0, y = 0 },
     config = {
-        -- TESTING AIDS: $200 starting + 41 starting consumables.
-        dollars = 196,
-        joker_slot = -5,          -- 0 joker slots (default 5 - 5)
-        consumable_slot = 39,     -- 41 consumable slots (default 2 + 39)
+        -- $25 starting (base 4 + 21)
+        dollars = 21,
+        -- 0 joker slots (default 5 - 5)
+        joker_slot = -5,
+        -- Default 2 consumable slots (no override)
     },
     unlocked = true,
     apply = function(self)
