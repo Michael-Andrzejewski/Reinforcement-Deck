@@ -565,8 +565,16 @@ function Card:calculate_seal(context)
         return nil
     end
 
-    -- Purple Seal on discard: create count Tarot cards
-    if context.discard then
+    -- Purple Seal on discard: create count Tarot cards.
+    --
+    -- Steamodded fires calculate_seal TWICE per discarded card: once via
+    -- the explicit `card:calculate_seal({discard=true})` call in
+    -- state_events.lua, and once via SMODS.calculate_context (which
+    -- iterates all hand cards through eval_card -> calculate_seal). Only
+    -- the explicit call has context.other_card == nil; the scan path
+    -- always sets it. We gate on that to fire the seal effect exactly
+    -- once per discard, matching vanilla's behavior.
+    if context.discard and not context.other_card then
         local purple_trig = rd_triggers(self, 'seal', 'purple')
         if purple_trig > 0 and G.consumeables and G.consumeables.config then
             local cap_left = G.consumeables.config.card_limit
