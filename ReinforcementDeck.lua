@@ -285,6 +285,32 @@ function Card:set_seal(_seal, silent, immediate)
     return rd_orig_set_seal(self, _seal, silent, immediate)
 end
 
+-- Wild and Stone enhancements affect suit-matching for hand evaluation.
+-- Vanilla Card:is_suit reads `ability.name == "Wild Card"` and
+-- `ability.effect == "Stone Card"`, but those strings get overwritten
+-- when a different enhancement is applied later (e.g. Hierophant on a
+-- Wild card sets effect to "Bonus Card"). Drive the check off our
+-- rd_stacks counters instead so wild/stone status survives stacking.
+local rd_orig_is_suit = Card.is_suit
+function Card:is_suit(suit, bypass_debuff, flush_calc)
+    if not rd_active() then return rd_orig_is_suit(self, suit, bypass_debuff, flush_calc) end
+    rd_ensure_stacks(self)
+    local s = self.ability.rd_stacks
+    local stone_present = s and (s.enh.stone or 0) > 0
+    local wild_present  = s and (s.enh.wild  or 0) > 0
+
+    if flush_calc then
+        if stone_present then return false end
+        if wild_present and not self.debuff then return true end
+    else
+        if self.debuff and not bypass_debuff then return end
+        if stone_present then return false end
+        if wild_present then return true end
+    end
+    -- Fall through to vanilla for Smeared Joker handling and base.suit match.
+    return rd_orig_is_suit(self, suit, bypass_debuff, flush_calc)
+end
+
 ----------------------------------------------------------------------
 -- Scoring: enhancements
 --
