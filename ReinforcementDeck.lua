@@ -26,6 +26,28 @@ local function rd_log(msg)
 end
 
 ----------------------------------------------------------------------
+-- Mod config (Mods menu -> Reinforcement Deck -> Config tab)
+----------------------------------------------------------------------
+
+local rd_config_defaults = {
+    start_dollars = 25,
+}
+
+local rd_mod_handle = SMODS.current_mod
+if rd_mod_handle then
+    rd_mod_handle.config = rd_mod_handle.config or {}
+    for k, v in pairs(rd_config_defaults) do
+        if rd_mod_handle.config[k] == nil then
+            rd_mod_handle.config[k] = v
+        end
+    end
+end
+
+local function rd_cfg()
+    return (rd_mod_handle and rd_mod_handle.config) or rd_config_defaults
+end
+
+----------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------
 
@@ -217,6 +239,8 @@ local RD_BANNED_KEYS = {
     -- Tarots that require / target Jokers (useless in this deck)
     'c_judgement',  -- creates a random Joker
     'c_temperance', -- pays out based on held Jokers' sell value
+    -- Boss blinds that soft-lock without Jokers
+    'bl_leaf',      -- Verdant Leaf: debuffs all cards until a Joker is sold
 }
 
 local function rd_apply_persistent_settings()
@@ -227,6 +251,24 @@ local function rd_apply_persistent_settings()
         G.GAME.banned_keys[k] = true
     end
     G.GAME.first_shop_buffoon = true
+    -- Fixup: if a save already has Verdant Leaf queued as the upcoming
+    -- boss (selected before bl_leaf was banned), reroll it now.
+    local blind_choices = G.GAME.round_resets and G.GAME.round_resets.blind_choices
+    local cur_boss_choice = blind_choices and blind_choices.Boss
+    local active_blind_key = G.GAME.blind and G.GAME.blind.config and G.GAME.blind.config.blind
+                             and G.GAME.blind.config.blind.key
+    rd_log(string.format('persistent: cur_boss_choice=%s active_blind=%s state=%s',
+        tostring(cur_boss_choice), tostring(active_blind_key), tostring(G.STATE)))
+    if blind_choices and cur_boss_choice == 'bl_leaf' and type(get_new_boss) == 'function' then
+        local guard = 0
+        local new_boss = 'bl_leaf'
+        while new_boss == 'bl_leaf' and guard < 50 do
+            new_boss = get_new_boss()
+            guard = guard + 1
+        end
+        blind_choices.Boss = new_boss
+        rd_log('persistent: rerolled queued Boss -> ' .. tostring(new_boss))
+    end
 end
 
 SMODS.Back({
@@ -235,8 +277,9 @@ SMODS.Back({
     atlas = 'rd_decks',
     pos = { x = 0, y = 0 },
     config = {
-        -- $25 starting (base 4 + 21)
-        dollars = 21,
+        -- Starting dollars are configurable via the Mods menu; we set
+        -- the absolute total in apply() below so this stays at 0.
+        dollars = 0,
         -- 0 joker slots (default 5 - 5)
         joker_slot = -5,
         -- Default 2 consumable slots (no override)
@@ -244,6 +287,16 @@ SMODS.Back({
     unlocked = true,
     apply = function(self)
         rd_apply_persistent_settings()
+        -- Configurable starting dollars (Mods menu -> Reinforcement Deck).
+        -- starting_params.dollars is the value copied into G.GAME.dollars
+        -- after Back:apply_to_run returns (see game.lua:2219), so writing
+        -- it here gives us absolute control regardless of base $4.
+        local desired = math.floor((rd_cfg().start_dollars or 25) + 0.5)
+        if desired < 0 then desired = 0 end
+        if desired > 100 then desired = 100 end
+        if G.GAME and G.GAME.starting_params then
+            G.GAME.starting_params.dollars = desired
+        end
         -- Starting consumable spawn (event-chained). Only fires on a
         -- new run; loaded runs already have their starting consumables.
         G.E_MANAGER:add_event(Event({
@@ -598,10 +651,44 @@ function Card:calculate_edition(context)
         or (context.main_scoring and context.cardarea == G.play))
     if not active then return rd_orig_calc_edition(self, context) end
 
+    -- Buffed editions (this deck only). We precompute every value against
+    -- the live running scoring globals so the result composes in the exact
+    -- order the scoring pipeline applies effect keys:
+    --   chips (additive) -> x_chips -> mult (additive) -> x_mult
+    -- Returning a plain table keeps this idempotent even if the scoring
+    -- engine calls calculate_edition more than once per card.
+    local cur_chips = hand_chips or 0
+    local cur_mult  = mult or 0
+
     local ret = { card = self }
-    if foil_trig > 0 then ret.chips  = rd_constant('e_foil',       'extra', 50)  * foil_trig end
-    if holo_trig > 0 then ret.mult   = rd_constant('e_holo',       'extra', 10)  * holo_trig end
-    if poly_trig > 0 then ret.x_mult = rd_constant('e_polychrome', 'extra', 1.5) ^ poly_trig end
+
+    -- Foil: +50 chips per trigger, AND x2 chips per trigger.
+    local chips_after_foil = cur_chips
+    if foil_trig > 0 then
+        local add  = rd_constant('e_foil', 'extra', 50) * foil_trig
+        local xchp = 2 ^ foil_trig
+        ret.chips   = add
+        ret.x_chips = xchp
+        chips_after_foil = (cur_chips + add) * xchp
+    end
+
+    -- Holographic: add the current chip total to mult, once per trigger.
+    -- Uses the post-foil chip count so it lines up with apply order.
+    local mult_after_holo = cur_mult
+    if holo_trig > 0 then
+        local holo_add = chips_after_foil * holo_trig
+        ret.mult = holo_add
+        mult_after_holo = cur_mult + holo_add
+    end
+
+    -- Polychrome: raise the (post-holo) mult to the power 1.25 per trigger.
+    -- Expressed as an x_mult so it multiplies the running mult to mult^exp.
+    if poly_trig > 0 and mult_after_holo > 0 then
+        local exponent  = 1.25 ^ poly_trig
+        local final_mult = mult_after_holo ^ exponent
+        ret.x_mult = final_mult / mult_after_holo
+    end
+
     return ret
 end
 
@@ -842,4 +929,39 @@ local rd_orig_card_stop_hover = Card.stop_hover
 function Card:stop_hover()
     if rd_hover_card == self then rd_hover_card = nil end
     return rd_orig_card_stop_hover(self)
+end
+
+----------------------------------------------------------------------
+-- Mod config tab UI
+----------------------------------------------------------------------
+
+if rd_mod_handle then
+    rd_mod_handle.config_tab = function()
+        local cfg = rd_mod_handle.config or rd_config_defaults
+        return {
+            n = G.UIT.ROOT,
+            config = { align = 'cm', padding = 0.05, colour = G.C.CLEAR },
+            nodes = {
+                { n = G.UIT.R, config = { align = 'cm', padding = 0.08 }, nodes = {
+                    { n = G.UIT.T, config = {
+                        text = 'Starting dollars (drag slider to set; 0 to 100, default 25):',
+                        scale = 0.38,
+                        colour = G.C.UI.TEXT_LIGHT,
+                    } },
+                }},
+                { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
+                    create_slider({
+                        label         = 'Start $',
+                        w             = 6,
+                        h             = 0.4,
+                        ref_table     = cfg,
+                        ref_value     = 'start_dollars',
+                        min           = 0,
+                        max           = 100,
+                        decimal_places = 0,
+                    }),
+                }},
+            },
+        }
+    end
 end
