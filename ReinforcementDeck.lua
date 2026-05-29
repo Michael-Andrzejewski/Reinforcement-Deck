@@ -31,6 +31,18 @@ end
 
 local rd_config_defaults = {
     start_dollars = 25,
+    -- Ghost-Deck effect: spectral cards can appear in the shop.
+    spectral_in_shop = false,
+    -- Heidelberg effect (Perkeo without the Joker): at the end of each
+    -- shop, create a Negative copy of a random held consumable.
+    heidelberg = false,
+}
+
+-- Spectrals that create or target Jokers. Useless (or harmful) in a
+-- 0-Joker deck, so we keep them out of the shop when spectral cards are
+-- enabled there.
+local RD_JOKER_SPECTRALS = {
+    'c_wraith', 'c_ankh', 'c_hex', 'c_soul', 'c_ectoplasm',
 }
 
 local rd_mod_handle = SMODS.current_mod
@@ -251,6 +263,18 @@ local function rd_apply_persistent_settings()
         G.GAME.banned_keys[k] = true
     end
     G.GAME.first_shop_buffoon = true
+
+    -- Ghost-Deck effect: spectral cards in the shop. spectral_rate is
+    -- read when the shop pool is built, so setting it here covers both
+    -- new runs (apply) and continued runs (start_run hook).
+    local cfg = rd_cfg()
+    G.GAME.spectral_rate = cfg.spectral_in_shop and 2 or 0
+    -- Keep Joker-making/targeting spectrals out of the shop while spectral
+    -- cards are enabled there; clear the ban again if the toggle is off.
+    for _, k in ipairs(RD_JOKER_SPECTRALS) do
+        G.GAME.banned_keys[k] = cfg.spectral_in_shop or nil
+    end
+
     -- Fixup: if a save already has Verdant Leaf queued as the upcoming
     -- boss (selected before bl_leaf was banned), reroll it now.
     local blind_choices = G.GAME.round_resets and G.GAME.round_resets.blind_choices
@@ -285,6 +309,28 @@ SMODS.Back({
         -- Default 2 consumable slots (no override)
     },
     unlocked = true,
+    -- Heidelberg effect (Perkeo without the Joker): at the end of each
+    -- shop, duplicate a random held consumable as a Negative copy.
+    -- Mirrors Balatro Multiplayer's Heidelberg Deck (CC_heidelberg.lua).
+    calculate = function(self, back, context)
+        if not rd_cfg().heidelberg then return end
+        if context.ending_shop and G.consumeables and G.consumeables.cards[1] then
+            G.E_MANAGER:add_event(Event({
+                func = function()
+                    local card_to_copy = pseudorandom_element(
+                        G.consumeables.cards, pseudoseed('rd_heidelberg'))
+                    if card_to_copy then
+                        local copied_card = copy_card(card_to_copy)
+                        copied_card:set_edition('e_negative', true)
+                        copied_card:add_to_deck()
+                        G.consumeables:emplace(copied_card)
+                    end
+                    return true
+                end,
+            }))
+            return { message = localize('k_duplicated_ex') }
+        end
+    end,
     apply = function(self)
         rd_apply_persistent_settings()
         -- Configurable starting dollars (Mods menu -> Reinforcement Deck).
@@ -959,6 +1005,20 @@ if rd_mod_handle then
                         min           = 0,
                         max           = 100,
                         decimal_places = 0,
+                    }),
+                }},
+                { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
+                    create_toggle({
+                        label     = 'Spectral cards in shop (Ghost Deck)',
+                        ref_table = cfg,
+                        ref_value = 'spectral_in_shop',
+                    }),
+                }},
+                { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
+                    create_toggle({
+                        label     = 'End-of-shop Negative copy (Heidelberg)',
+                        ref_table = cfg,
+                        ref_value = 'heidelberg',
                     }),
                 }},
             },
