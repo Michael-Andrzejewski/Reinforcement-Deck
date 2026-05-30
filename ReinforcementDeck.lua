@@ -31,18 +31,21 @@ end
 
 local rd_config_defaults = {
     start_dollars = 25,
-    -- Ghost-Deck effect: spectral cards can appear in the shop.
-    spectral_in_shop = false,
+    -- Plasma-Deck effect: equalize chips and mult at final scoring.
+    plasma = false,
+    -- Number of Joker slots (0 = jokerless). When > 0 the Joker-dependent
+    -- bans (Judgement + Joker-targeting spectrals) are lifted.
+    joker_slots = 0,
     -- Heidelberg effect (Perkeo without the Joker): at the end of each
     -- shop, create a Negative copy of a random held consumable.
     heidelberg = false,
-}
-
--- Spectrals that create or target Jokers. Useless (or harmful) in a
--- 0-Joker deck, so we keep them out of the shop when spectral cards are
--- enabled there.
-local RD_JOKER_SPECTRALS = {
-    'c_wraith', 'c_ankh', 'c_hex', 'c_soul', 'c_ectoplasm',
+    -- Shop appearance weights. Vanilla defaults: tarot 4, planet 4,
+    -- spectral 0, joker 20. We default joker to 0 (jokerless) and the
+    -- rest to vanilla, which reproduces the deck's normal shop.
+    tarot_rate    = 4,
+    planet_rate   = 4,
+    spectral_rate = 0,
+    joker_rate    = 0,
 }
 
 local rd_mod_handle = SMODS.current_mod
@@ -62,6 +65,29 @@ end
 ----------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------
+
+-- Big-number (Talisman / Amulet) compatibility. When one of those mods
+-- is loaded, scoring values (hand_chips / mult, and the chips/mult passed
+-- into Back:calculate) can become big numbers. Arithmetic metamethods
+-- (+ - * / ^) dispatch fine, but under LuaJIT a mixed comparison and
+-- math.floor would error. Amulet's OmegaNum is cdata (not a table), so we
+-- detect via Big.is when available and fall back to a table check. Any
+-- value that has grown into a big number during scoring is necessarily
+-- large and positive, so the helpers can short-circuit safely.
+local function rd_is_big(x)
+    if Big and Big.is then return Big.is(x) and true or false end
+    return type(x) == 'table'
+end
+
+local function rd_gt0(x)
+    if rd_is_big(x) then return true end
+    return x > 0
+end
+
+local function rd_floor(x)
+    if rd_is_big(x) then return x end  -- huge magnitudes need no flooring
+    return math.floor(x)
+end
 
 local function rd_active()
     if not (G and G.GAME and G.GAME.selected_back) then return false end
@@ -244,36 +270,52 @@ end
 -- only called by vanilla on new runs (Game:start_run skips
 -- Back:apply_to_run when loading a save), so we ALSO call this from
 -- our Game:start_run hook below to cover continued runs.
+-- Always banned, regardless of config.
 local RD_BANNED_KEYS = {
     -- Buffoon packs (Joker packs)
     'p_buffoon_normal_1', 'p_buffoon_normal_2',
     'p_buffoon_jumbo_1',  'p_buffoon_mega_1',
-    -- Tarots that require / target Jokers (useless in this deck)
-    'c_judgement',  -- creates a random Joker
-    'c_temperance', -- pays out based on held Jokers' sell value
+    -- Tarot that pays out based on held Jokers' sell value
+    'c_temperance',
     -- Boss blinds that soft-lock without Jokers
     'bl_leaf',      -- Verdant Leaf: debuffs all cards until a Joker is sold
 }
 
+-- Banned only while the deck is jokerless (joker_slots <= 0). These are
+-- re-enabled the moment the player gives themselves Joker slots.
+local RD_JOKER_DEPENDENT_KEYS = {
+    'c_judgement',  -- creates a random Joker
+    'c_wraith',     -- creates a random Rare Joker
+    'c_ankh',       -- copies a Joker
+    'c_hex',        -- adds Polychrome to a random Joker
+    'c_soul',       -- creates a Legendary Joker
+    'c_ectoplasm',  -- adds Negative to a random Joker
+}
+
 local function rd_apply_persistent_settings()
     if not (G and G.GAME) then return end
-    G.GAME.joker_rate = 0
+    local cfg = rd_cfg()
     G.GAME.banned_keys = G.GAME.banned_keys or {}
+
+    -- Always-on bans
     for _, k in ipairs(RD_BANNED_KEYS) do
         G.GAME.banned_keys[k] = true
     end
+    -- Joker-dependent bans: only while jokerless. Setting to nil clears the
+    -- ban so Judgement / Joker-targeting spectrals come back when slots > 0.
+    local jokerless = (cfg.joker_slots or 0) <= 0
+    for _, k in ipairs(RD_JOKER_DEPENDENT_KEYS) do
+        G.GAME.banned_keys[k] = jokerless or nil
+    end
+
     G.GAME.first_shop_buffoon = true
 
-    -- Ghost-Deck effect: spectral cards in the shop. spectral_rate is
-    -- read when the shop pool is built, so setting it here covers both
-    -- new runs (apply) and continued runs (start_run hook).
-    local cfg = rd_cfg()
-    G.GAME.spectral_rate = cfg.spectral_in_shop and 2 or 0
-    -- Keep Joker-making/targeting spectrals out of the shop while spectral
-    -- cards are enabled there; clear the ban again if the toggle is off.
-    for _, k in ipairs(RD_JOKER_SPECTRALS) do
-        G.GAME.banned_keys[k] = cfg.spectral_in_shop or nil
-    end
+    -- Shop appearance weights (read when the shop pool is built, so this
+    -- covers new runs via apply() and continued runs via start_run).
+    G.GAME.tarot_rate    = cfg.tarot_rate    or 4
+    G.GAME.planet_rate   = cfg.planet_rate   or 4
+    G.GAME.spectral_rate = cfg.spectral_rate or 0
+    G.GAME.joker_rate    = cfg.joker_rate    or 0
 
     -- Fixup: if a save already has Verdant Leaf queued as the upcoming
     -- boss (selected before bl_leaf was banned), reroll it now.
@@ -301,20 +343,37 @@ SMODS.Back({
     atlas = 'rd_decks',
     pos = { x = 0, y = 0 },
     config = {
-        -- Starting dollars are configurable via the Mods menu; we set
-        -- the absolute total in apply() below so this stays at 0.
+        -- Starting dollars and Joker slots are configurable via the Mods
+        -- menu; we set the absolute totals in apply() below, so these stay 0.
         dollars = 0,
-        -- 0 joker slots (default 5 - 5)
-        joker_slot = -5,
+        joker_slot = 0,
         -- Default 2 consumable slots (no override)
     },
     unlocked = true,
-    -- Heidelberg effect (Perkeo without the Joker): at the end of each
-    -- shop, duplicate a random held consumable as a Negative copy.
-    -- Mirrors Balatro Multiplayer's Heidelberg Deck (CC_heidelberg.lua).
     calculate = function(self, back, context)
-        if not rd_cfg().heidelberg then return end
-        if context.ending_shop and G.consumeables and G.consumeables.cards[1] then
+        -- Plasma-Deck effect: equalize chips and mult at the final scoring
+        -- step. Returns the balanced values; state_events.lua consumes them
+        -- as the new hand_chips / mult (see vanilla Plasma in back.lua).
+        if rd_cfg().plasma and context.context == 'final_scoring_step' then
+            local tot  = (context.chips or 0) + (context.mult or 0)
+            local half = rd_floor(tot / 2)
+            context.chips = half
+            context.mult  = half
+            update_hand_text({ delay = 0 }, { chips = half, mult = half })
+            if attention_text then
+                attention_text({
+                    scale = 1.3, text = localize('k_balanced'), hold = 1.4,
+                    align = 'cm', offset = { x = 0, y = -2.7 }, major = G.play,
+                })
+            end
+            return half, half
+        end
+
+        -- Heidelberg effect (Perkeo without the Joker): at the end of each
+        -- shop, duplicate a random held consumable as a Negative copy.
+        -- Mirrors Balatro Multiplayer's Heidelberg Deck (CC_heidelberg.lua).
+        if rd_cfg().heidelberg and context.ending_shop
+           and G.consumeables and G.consumeables.cards[1] then
             G.E_MANAGER:add_event(Event({
                 func = function()
                     local card_to_copy = pseudorandom_element(
@@ -342,6 +401,14 @@ SMODS.Back({
         if desired > 100 then desired = 100 end
         if G.GAME and G.GAME.starting_params then
             G.GAME.starting_params.dollars = desired
+        end
+        -- Configurable Joker slots (absolute). starting_params.joker_slots
+        -- is copied into G.jokers' card_limit during run setup (game.lua),
+        -- so writing it here gives exact control. config.joker_slot stays 0.
+        local slots = math.floor((rd_cfg().joker_slots or 0) + 0.5)
+        if slots < 0 then slots = 0 end
+        if G.GAME and G.GAME.starting_params then
+            G.GAME.starting_params.joker_slots = slots
         end
         -- Starting consumable spawn (event-chained). Only fires on a
         -- new run; loaded runs already have their starting consumables.
@@ -729,7 +796,7 @@ function Card:calculate_edition(context)
 
     -- Polychrome: raise the (post-holo) mult to the power 1.25 per trigger.
     -- Expressed as an x_mult so it multiplies the running mult to mult^exp.
-    if poly_trig > 0 and mult_after_holo > 0 then
+    if poly_trig > 0 and rd_gt0(mult_after_holo) then
         local exponent  = 1.25 ^ poly_trig
         local final_mult = mult_after_holo ^ exponent
         ret.x_mult = final_mult / mult_after_holo
@@ -984,43 +1051,45 @@ end
 if rd_mod_handle then
     rd_mod_handle.config_tab = function()
         local cfg = rd_mod_handle.config or rd_config_defaults
+
+        local function row(node)
+            return { n = G.UIT.R, config = { align = 'cm', padding = 0.04 }, nodes = { node } }
+        end
+        local function label_row(text)
+            return row({ n = G.UIT.T, config = {
+                text = text, scale = 0.36, colour = G.C.UI.TEXT_LIGHT,
+            } })
+        end
+        local function slider(lbl, key, lo, hi)
+            return row(create_slider({
+                label = lbl, w = 5, h = 0.4,
+                ref_table = cfg, ref_value = key,
+                min = lo, max = hi, decimal_places = 0,
+            }))
+        end
+        local function toggle(lbl, key)
+            return row(create_toggle({ label = lbl, ref_table = cfg, ref_value = key }))
+        end
+
         return {
             n = G.UIT.ROOT,
-            config = { align = 'cm', padding = 0.05, colour = G.C.CLEAR },
+            config = { align = 'cm', padding = 0.04, colour = G.C.CLEAR },
             nodes = {
-                { n = G.UIT.R, config = { align = 'cm', padding = 0.08 }, nodes = {
-                    { n = G.UIT.T, config = {
-                        text = 'Starting dollars (drag slider to set; 0 to 100, default 25):',
-                        scale = 0.38,
-                        colour = G.C.UI.TEXT_LIGHT,
-                    } },
-                }},
-                { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
-                    create_slider({
-                        label         = 'Start $',
-                        w             = 6,
-                        h             = 0.4,
-                        ref_table     = cfg,
-                        ref_value     = 'start_dollars',
-                        min           = 0,
-                        max           = 100,
-                        decimal_places = 0,
-                    }),
-                }},
-                { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
-                    create_toggle({
-                        label     = 'Spectral cards in shop (Ghost Deck)',
-                        ref_table = cfg,
-                        ref_value = 'spectral_in_shop',
-                    }),
-                }},
-                { n = G.UIT.R, config = { align = 'cm', padding = 0.05 }, nodes = {
-                    create_toggle({
-                        label     = 'End-of-shop Negative copy (Heidelberg)',
-                        ref_table = cfg,
-                        ref_value = 'heidelberg',
-                    }),
-                }},
+                label_row('Starting dollars (0 to 100, default 25):'),
+                slider('Start $', 'start_dollars', 0, 100),
+
+                toggle('Plasma Deck: equalize chips & mult', 'plasma'),
+
+                label_row('Joker slots (0 = jokerless; >0 re-enables Judgement & Joker spectrals):'),
+                slider('Joker slots', 'joker_slots', 0, 10),
+
+                toggle('End-of-shop Negative copy (Heidelberg)', 'heidelberg'),
+
+                label_row('Shop appearance weights (tarot/planet default 4, spectral/joker default 0):'),
+                slider('Tarot',    'tarot_rate',    0, 50),
+                slider('Planet',   'planet_rate',   0, 50),
+                slider('Spectral', 'spectral_rate', 0, 50),
+                slider('Joker',    'joker_rate',    0, 50),
             },
         }
     end
