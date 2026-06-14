@@ -4,16 +4,12 @@ By **Soareverix**.
 
 A jokerless Balatro deck where playing-card modifiers **stack** instead of replacing each other. Tarots and spectrals always increment a counter; the scoring code rolls the counters into a single combined effect each time a card is scored.
 
-## Core gimmick
+## Game Mechanics
 
-- **0 Joker slots**, no Jokers in the shop, no Buffoon packs
+- **0 Joker slots**: So, there are no Jokers in the shop, no Buffoon packs, and no Joker-related cards at all
 - **Enhancements stack**: Chariot a card three times → 3× Steel (X1.5 in-hand becomes X1.5³ ≈ X3.375)
-- **Editions stack**: Aura/Wheel of Fortune over and over → 3× Polychrome = X1.5³ ≈ X3.375 mult, etc.
-- **Seals stack**: 2× Purple Seal discarded gives 2 Tarots, 3× Blue Seal at end of round gives 3 Planets
-- **Red Seal additivity**: a 2× Red Seal Ace scores 11 × 3 = 33 base chips. The trigger formula is `triggers(M) = count(M) + red_seal_count` for enhancements & editions; seals still fire just `count` times (Red Seal does not add to itself or other seals).
-- **Stone behavior**: when Stone is the most recently applied enhancement, the card loses rank/suit identity (vanilla Stone Card). Once another enhancement is layered on top, Stone falls back to a flat +50 chips per stack and the card behaves normally for hand evaluation.
-- **Wild card** survives stacking (still counts as any suit even after another enhancement is applied).
-- **Wheel of Fortune** is repurposed in this deck: instead of trying to apply an edition to a Joker (impossible here), it applies a random edition to a random card in your hand. Tooltip text is overridden to reflect this.
+- **Editions stack and are adjusted**: Wheel of Fortune now gives a card in hand an edition. Foil does +50 and 2x chips; Holographic adds +mult equal to chips, and polychrome raises the score to the x^1.25 power. Editions are extremely powerful, but inconsistent.
+- **Seals stack**: 2× Purple Seal discarded gives 2 Tarots, 3× Blue Seal at end of round gives 3 Planets, 2x red seal does +2 to every enhancement/edition (red seal does not add to other seals).
 - **Hover tooltip** lists all stacked modifiers in a "Reinforcements:" block.
 
 Banned consumables in this deck (since they require/target Jokers):
