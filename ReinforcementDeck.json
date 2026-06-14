@@ -2,7 +2,7 @@
   "id": "ReinforcementDeck",
   "name": "Reinforcement Deck",
   "display_name": "Reinforcement Deck",
-  "author": ["Custom"],
+  "author": ["Soareverix"],
   "description": "A jokerless deck where playing cards stack unlimited enhancements, seals, and editions. Tarots and Spectrals always increment - they never replace.",
   "prefix": "rd",
   "main_file": "ReinforcementDeck.lua",

@@ -1,5 +1,6 @@
 --[[
   Reinforcement Deck
+  Author: Soareverix
 
   A jokerless deck where every modifier on a playing card stacks instead
   of replacing what came before. Tarots / spectrals always increment a
@@ -1052,44 +1053,46 @@ if rd_mod_handle then
     rd_mod_handle.config_tab = function()
         local cfg = rd_mod_handle.config or rd_config_defaults
 
-        local function row(node)
-            return { n = G.UIT.R, config = { align = 'cm', padding = 0.04 }, nodes = { node } }
-        end
+        -- Compact 2-column layout so everything fits on screen.
         local function label_row(text)
-            return row({ n = G.UIT.T, config = {
-                text = text, scale = 0.36, colour = G.C.UI.TEXT_LIGHT,
-            } })
+            return { n = G.UIT.R, config = { align = 'cm', padding = 0.02 }, nodes = {
+                { n = G.UIT.T, config = { text = text, scale = 0.3, colour = G.C.UI.TEXT_LIGHT } },
+            } }
         end
         local function slider(lbl, key, lo, hi)
-            return row(create_slider({
-                label = lbl, w = 5, h = 0.4,
+            return create_slider({
+                label = lbl, w = 3, h = 0.3, label_scale = 0.3, text_scale = 0.28,
                 ref_table = cfg, ref_value = key,
                 min = lo, max = hi, decimal_places = 0,
-            }))
+            })
         end
         local function toggle(lbl, key)
-            return row(create_toggle({ label = lbl, ref_table = cfg, ref_value = key }))
+            return create_toggle({
+                label = lbl, label_scale = 0.32, w = 2.4,
+                ref_table = cfg, ref_value = key,
+            })
+        end
+        -- Two cells side by side in one row.
+        local function pair(a, b)
+            return { n = G.UIT.R, config = { align = 'cm', padding = 0.02 }, nodes = {
+                { n = G.UIT.C, config = { align = 'cm', padding = 0.06 }, nodes = { a } },
+                { n = G.UIT.C, config = { align = 'cm', padding = 0.06 }, nodes = { b } },
+            } }
         end
 
         return {
             n = G.UIT.ROOT,
-            config = { align = 'cm', padding = 0.04, colour = G.C.CLEAR },
+            config = { align = 'cm', padding = 0.02, colour = G.C.CLEAR },
             nodes = {
-                label_row('Starting dollars (0 to 100, default 25):'),
-                slider('Start $', 'start_dollars', 0, 100),
-
-                toggle('Plasma Deck: equalize chips & mult', 'plasma'),
-
-                label_row('Joker slots (0 = jokerless; >0 re-enables Judgement & Joker spectrals):'),
-                slider('Joker slots', 'joker_slots', 0, 10),
-
-                toggle('End-of-shop Negative copy (Heidelberg)', 'heidelberg'),
-
-                label_row('Shop appearance weights (tarot/planet default 4, spectral/joker default 0):'),
-                slider('Tarot',    'tarot_rate',    0, 50),
-                slider('Planet',   'planet_rate',   0, 50),
-                slider('Spectral', 'spectral_rate', 0, 50),
-                slider('Joker',    'joker_rate',    0, 50),
+                pair(slider('Start $', 'start_dollars', 0, 100),
+                     slider('Joker slots', 'joker_slots', 0, 10)),
+                pair(toggle('Plasma (equalize)', 'plasma'),
+                     toggle('Heidelberg copy', 'heidelberg')),
+                label_row('Shop weights (tarot/planet default 4, spectral/joker default 0):'),
+                pair(slider('Tarot', 'tarot_rate', 0, 50),
+                     slider('Planet', 'planet_rate', 0, 50)),
+                pair(slider('Spectral', 'spectral_rate', 0, 50),
+                     slider('Joker', 'joker_rate', 0, 50)),
             },
         }
     end

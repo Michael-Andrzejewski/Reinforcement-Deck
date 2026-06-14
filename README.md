@@ -1,5 +1,7 @@
 # Reinforcement Deck
 
+By **Soareverix**.
+
 A jokerless Balatro deck where playing-card modifiers **stack** instead of replacing each other. Tarots and spectrals always increment a counter; the scoring code rolls the counters into a single combined effect each time a card is scored.
 
 ## Core gimmick
@@ -117,4 +119,4 @@ Each player runs their own independent run with the deck. Multiplayer effects (e
 
 ## Compatibility
 
-This mod is not designed for Cryptid and the two have not been tested together. ScalingStakes (a separate mod by the same author) is fine to run alongside.
+This mod is not designed for Cryptid and the two have not been tested together. ScalingStakes (a separate mod by Soareverix) is fine to run alongside.
