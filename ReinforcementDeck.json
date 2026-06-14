@@ -3,7 +3,7 @@
   "name": "Reinforcement Deck",
   "display_name": "Reinforcement Deck",
   "author": ["Soareverix"],
-  "description": "A jokerless deck where playing cards stack unlimited enhancements, seals, and editions. Tarots and Spectrals always increment - they never replace.",
+  "description": "A jokerless deck where playing cards stack unlimited enhancements, seals, and editions.",
   "prefix": "rd",
   "main_file": "ReinforcementDeck.lua",
   "badge_colour": "8844AA",
