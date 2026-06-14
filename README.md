@@ -2,9 +2,9 @@
 
 By **Soareverix**.
 
-A jokerless Balatro deck where playing-card modifiers **stack** instead of replacing each other. Tarots and spectrals always increment a counter; the scoring code rolls the counters into a single combined effect each time a card is scored.
+A jokerless Balatro deck where enhancements **stack** instead of replacing each other. So, you can have a 2x steel and 3x gold card that does x2.25 mult when held in hand and gives you $9 at the end of the round.
 
-## Game Mechanics
+## Default Game Mechanics
 
 - **0 Joker slots**: So, there are no Jokers in the shop, no Buffoon packs, and no Joker-related cards at all
 - **Enhancements stack**: Chariot a card three times → 3× Steel (X1.5 in-hand becomes X1.5³ ≈ X3.375)
@@ -14,9 +14,19 @@ A jokerless Balatro deck where playing-card modifiers **stack** instead of repla
 
 Banned consumables in this deck (since they require/target Jokers):
 
-- The Judgement (creates a random Joker)
-- Temperance (sums Joker sell values)
-- Hex / Wraith / Ankh / Soul / Ectoplasm — these are vanilla spectrals that target Jokers; they will roll as nothing-happens on play.
+- Judgement
+- Temperance
+- Hex / Wraith / Ankh / Soul / Ectoplasm
+(this is true as long as there are no Jokers; Jokers can be added back with the config)
+
+## Config Options
+- Can adjust starting money
+- Can toggle Plasma/Heidelberg deck effects
+- Can re-add Jokers, change Joker slots (this will add Joker consumables back)
+
+## About me
+- This mod was made for Bean! Inspired by the jokerless multiplayer and because Balatro originally wasn't going to have Jokers at all.
+- I've built a number of mods for YouTubers on commission but this one was made purely with love haha
 
 ## Required versions
 
