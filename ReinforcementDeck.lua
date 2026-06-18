@@ -1046,6 +1046,107 @@ function Card:stop_hover()
 end
 
 ----------------------------------------------------------------------
+-- EXPERIMENTAL: blended enhancement textures
+--
+-- A card normally shows only its single `children.center` sprite (the
+-- most-recently applied enhancement). When several enhancement TYPES are
+-- stacked, we instead draw each type's texture layered with an alpha
+-- proportional to its count: alpha(M) = count(M) / total_count. So gold
+-- alone is full gold; gold + steel is 1/2 each; gold + 2x steel is 1/3
+-- gold under 2/3 steel. Purely cosmetic -- scoring is untouched.
+----------------------------------------------------------------------
+
+-- enhancement field ('gold') -> center key ('m_gold')
+local RD_FIELD_TO_CENTER = {}
+for center_key, field in pairs(RD_ENH_KEY_MAP) do
+    RD_FIELD_TO_CENTER[field] = center_key
+end
+
+-- Fixed draw order (bottom -> top). rd_stacks only tracks counts, not the
+-- order modifiers were applied, so we use a stable order rather than true
+-- recency. Stone first so other enhancements layer over it.
+local RD_ENH_DRAW_ORDER = { 'stone', 'bonus', 'mult', 'gold', 'steel', 'glass', 'lucky', 'wild' }
+
+-- Collect the enhancement layers present on a card, in draw order.
+-- Returns a list of { key = 'm_x', count = n } and the total count.
+local function rd_enh_layers(card)
+    local s = card and card.ability and card.ability.rd_stacks
+    if not s then return {}, 0 end
+    local list, total = {}, 0
+    for _, field in ipairs(RD_ENH_DRAW_ORDER) do
+        local c = s.enh[field] or 0
+        local key = RD_FIELD_TO_CENTER[field]
+        if c > 0 and key and G.P_CENTERS[key] and G.P_CENTERS[key].pos then
+            list[#list + 1] = { key = key, count = c }
+            total = total + c
+        end
+    end
+    return list, total
+end
+
+-- Only blend when 2+ distinct enhancement types are stacked. A single
+-- type already renders correctly via the vanilla center sprite.
+local function rd_should_blend(card)
+    local list = rd_enh_layers(card)
+    return #list >= 2
+end
+
+-- Draw the proportional enhancement blend in place of the single center
+-- texture. `orig` is the sprite's original draw_shader; we reuse the same
+-- sprite, repointing its atlas position per layer and tinting alpha via
+-- the engine overlay colour (G.BRUTE_OVERLAY), which Sprite drawing
+-- multiplies in.
+local function rd_draw_enh_blend(spr, card, orig, ...)
+    local list, total = rd_enh_layers(card)
+    if total <= 0 or #list < 2 then return orig(spr, 'dissolve', ...) end
+
+    local saved_overlay = G.BRUTE_OVERLAY
+    local restore_pos = card.config and card.config.center and card.config.center.pos
+
+    -- Bottom-to-top alpha compositing. Drawing layer k at
+    -- alpha = count_k / (running total through k) makes the final pixel
+    -- equal sum(count_i / total * texture_i): the bottom layer paints
+    -- opaque, each layer above contributes exactly its share. e.g. gold
+    -- then 2x steel -> gold opaque, steel at 2/3 -> 1/3 gold, 2/3 steel.
+    local running = 0
+    for _, layer in ipairs(list) do
+        local center = G.P_CENTERS[layer.key]
+        if center and center.pos then
+            running = running + layer.count
+            spr:set_sprite_pos(center.pos)
+            G.BRUTE_OVERLAY = { 1, 1, 1, layer.count / running }
+            orig(spr, 'dissolve', ...)
+        end
+    end
+
+    G.BRUTE_OVERLAY = saved_overlay
+    if restore_pos then spr:set_sprite_pos(restore_pos) end
+end
+
+-- Wrap the center sprite's draw_shader whenever sprites are (re)built, so
+-- the 'dissolve' enhancement draw routes through our blend. All other
+-- shader passes (vortex/negative/edition overlays/etc.) fall through.
+local rd_orig_set_sprites = Card.set_sprites
+function Card:set_sprites(_center, _front)
+    local res = rd_orig_set_sprites(self, _center, _front)
+    if rd_active() and self.children and self.children.center then
+        local spr = self.children.center
+        if not spr.rd_blend_wrapped then
+            spr.rd_blend_wrapped = true
+            local card = self
+            local orig_draw_shader = spr.draw_shader
+            spr.draw_shader = function(s, _shader, ...)
+                if _shader == 'dissolve' and rd_active() and rd_should_blend(card) then
+                    return rd_draw_enh_blend(s, card, orig_draw_shader, ...)
+                end
+                return orig_draw_shader(s, _shader, ...)
+            end
+        end
+    end
+    return res
+end
+
+----------------------------------------------------------------------
 -- Mod config tab UI
 ----------------------------------------------------------------------
 
