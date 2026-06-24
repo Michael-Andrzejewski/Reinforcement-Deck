@@ -279,7 +279,7 @@ local RD_BANNED_KEYS = {
     -- Tarot that pays out based on held Jokers' sell value
     'c_temperance',
     -- Boss blinds that soft-lock without Jokers
-    'bl_leaf',      -- Verdant Leaf: debuffs all cards until a Joker is sold
+    'bl_final_leaf',      -- Verdant Leaf: debuffs all cards until a Joker is sold
 }
 
 -- Banned only while the deck is jokerless (joker_slots <= 0). These are
@@ -319,17 +319,17 @@ local function rd_apply_persistent_settings()
     G.GAME.joker_rate    = cfg.joker_rate    or 0
 
     -- Fixup: if a save already has Verdant Leaf queued as the upcoming
-    -- boss (selected before bl_leaf was banned), reroll it now.
+    -- boss (selected before bl_final_leaf was banned), reroll it now.
     local blind_choices = G.GAME.round_resets and G.GAME.round_resets.blind_choices
     local cur_boss_choice = blind_choices and blind_choices.Boss
     local active_blind_key = G.GAME.blind and G.GAME.blind.config and G.GAME.blind.config.blind
                              and G.GAME.blind.config.blind.key
     rd_log(string.format('persistent: cur_boss_choice=%s active_blind=%s state=%s',
         tostring(cur_boss_choice), tostring(active_blind_key), tostring(G.STATE)))
-    if blind_choices and cur_boss_choice == 'bl_leaf' and type(get_new_boss) == 'function' then
+    if blind_choices and cur_boss_choice == 'bl_final_leaf' and type(get_new_boss) == 'function' then
         local guard = 0
-        local new_boss = 'bl_leaf'
-        while new_boss == 'bl_leaf' and guard < 50 do
+        local new_boss = 'bl_final_leaf'
+        while new_boss == 'bl_final_leaf' and guard < 50 do
             new_boss = get_new_boss()
             guard = guard + 1
         end
