@@ -40,6 +40,10 @@ local rd_config_defaults = {
     -- Heidelberg effect (Perkeo without the Joker): at the end of each
     -- shop, create a Negative copy of a random held consumable.
     heidelberg = false,
+    -- Experimental: blend stacked enhancement textures proportionally.
+    -- Off by default -- it is cosmetic and has caused visual glitches in
+    -- multiplayer (erased ranks, stuck textures). See the renderer notes.
+    blend_textures = false,
     -- Shop appearance weights. Vanilla defaults: tarot 4, planet 4,
     -- spectral 0, joker 20. We default joker to 0 (jokerless) and the
     -- rest to vanilla, which reproduces the deck's normal shop.
@@ -1084,9 +1088,11 @@ local function rd_enh_layers(card)
     return list, total
 end
 
--- Only blend when 2+ distinct enhancement types are stacked. A single
--- type already renders correctly via the vanilla center sprite.
+-- Only blend when the (experimental) feature is enabled AND 2+ distinct
+-- enhancement types are stacked. A single type already renders correctly
+-- via the vanilla center sprite. Defaulting off keeps multiplayer stable.
 local function rd_should_blend(card)
+    if not rd_cfg().blend_textures then return false end
     local list = rd_enh_layers(card)
     return #list >= 2
 end
@@ -1189,6 +1195,8 @@ if rd_mod_handle then
                      slider('Joker slots', 'joker_slots', 0, 10)),
                 pair(toggle('Plasma (equalize)', 'plasma'),
                      toggle('Heidelberg copy', 'heidelberg')),
+                pair(toggle('Blend textures (experimental)', 'blend_textures'),
+                     { n = G.UIT.T, config = { text = '', scale = 0.01, colour = G.C.CLEAR } }),
                 label_row('Shop weights (tarot/planet default 4, spectral/joker default 0):'),
                 pair(slider('Tarot', 'tarot_rate', 0, 50),
                      slider('Planet', 'planet_rate', 0, 50)),
