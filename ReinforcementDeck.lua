@@ -119,6 +119,10 @@ local function rd_blank_stacks()
         enh  = { bonus = 0, mult = 0, glass = 0, steel = 0, gold = 0, stone = 0, lucky = 0, wild = 0 },
         seal = { red = 0, blue = 0, gold = 0, purple = 0 },
         edit = { foil = 0, holographic = 0, polychrome = 0 },
+        -- Ordered history of enhancement applications (field names), used
+        -- to draw the diagonal "cake": consecutive same-type runs merge
+        -- into one band sized by its share of the total applications.
+        enh_order = {},
     }
 end
 
@@ -180,6 +184,7 @@ local function rd_ensure_stacks(card)
     local ck = card.config and card.config.center_key
     if ck and RD_ENH_KEY_MAP[ck] then
         s.enh[RD_ENH_KEY_MAP[ck]] = 1
+        s.enh_order[#s.enh_order + 1] = RD_ENH_KEY_MAP[ck]
     end
 
     if card.seal and RD_SEAL_KEY_MAP[card.seal] then
@@ -459,6 +464,7 @@ function Card:set_ability(center, initial, delay_sprites)
         rd_ensure_stacks(self)
         local field = RD_ENH_KEY_MAP[center.key]
         self.ability.rd_stacks.enh[field] = self.ability.rd_stacks.enh[field] + 1
+        self.ability.rd_stacks.enh_order[#self.ability.rd_stacks.enh_order + 1] = field
         return rd_orig_set_ability(self, center, initial, delay_sprites)
     end
     local res = rd_orig_set_ability(self, center, initial, delay_sprites)
@@ -1050,14 +1056,17 @@ function Card:stop_hover()
 end
 
 ----------------------------------------------------------------------
--- EXPERIMENTAL: blended enhancement textures
+-- EXPERIMENTAL: diagonal "cake" of stacked enhancement textures
 --
--- A card normally shows only its single `children.center` sprite (the
--- most-recently applied enhancement). When several enhancement TYPES are
--- stacked, we instead draw each type's texture layered with an alpha
--- proportional to its count: alpha(M) = count(M) / total_count. So gold
--- alone is full gold; gold + steel is 1/2 each; gold + 2x steel is 1/3
--- gold under 2/3 steel. Purely cosmetic -- scoring is untouched.
+-- Each enhancement application is recorded in rd_stacks.enh_order. We
+-- run-length encode that history (consecutive same-type runs merge) and
+-- composite the textures into diagonal bands, each sized by its run's
+-- share of the total applications. The composite is rendered once into an
+-- off-screen canvas (cached, rebuilt only when the history changes) and
+-- the card's center sprite is pointed at it, so Balatro's normal card
+-- draw (tilt, dissolve, editions) handles the rest. No global state, no
+-- N-times redraw -- this is the multiplayer-safe replacement for the old
+-- alpha blend. Purely cosmetic; scoring is untouched. Off by default.
 ----------------------------------------------------------------------
 
 -- enhancement field ('gold') -> center key ('m_gold')
@@ -1066,87 +1075,145 @@ for center_key, field in pairs(RD_ENH_KEY_MAP) do
     RD_FIELD_TO_CENTER[field] = center_key
 end
 
--- Fixed draw order (bottom -> top). rd_stacks only tracks counts, not the
--- order modifiers were applied, so we use a stable order rather than true
--- recency. Stone first so other enhancements layer over it.
-local RD_ENH_DRAW_ORDER = { 'stone', 'bonus', 'mult', 'gold', 'steel', 'glass', 'lucky', 'wild' }
-
--- Collect the enhancement layers present on a card, in draw order.
--- Returns a list of { key = 'm_x', count = n } and the total count.
-local function rd_enh_layers(card)
+-- Run-length encode the application history into bands, oldest -> newest.
+-- Returns a list of { key = 'm_x', frac = run_count / total }.
+local function rd_enh_bands(card)
     local s = card and card.ability and card.ability.rd_stacks
-    if not s then return {}, 0 end
-    local list, total = {}, 0
-    for _, field in ipairs(RD_ENH_DRAW_ORDER) do
-        local c = s.enh[field] or 0
+    local order = s and s.enh_order
+    if not order or #order == 0 then return {} end
+    local runs = {}
+    for _, field in ipairs(order) do
         local key = RD_FIELD_TO_CENTER[field]
-        if c > 0 and key and G.P_CENTERS[key] and G.P_CENTERS[key].pos then
-            list[#list + 1] = { key = key, count = c }
-            total = total + c
+        if key and G.P_CENTERS and G.P_CENTERS[key] and G.P_CENTERS[key].pos then
+            local last = runs[#runs]
+            if last and last.field == field then
+                last.count = last.count + 1
+            else
+                runs[#runs + 1] = { field = field, key = key, count = 1 }
+            end
         end
     end
-    return list, total
+    local total = 0
+    for _, r in ipairs(runs) do total = total + r.count end
+    if total == 0 then return {} end
+    local bands = {}
+    for _, r in ipairs(runs) do
+        bands[#bands + 1] = { key = r.key, frac = r.count / total }
+    end
+    return bands
 end
 
--- Only blend when the (experimental) feature is enabled AND 2+ distinct
--- enhancement types are stacked. A single type already renders correctly
--- via the vanilla center sprite. Defaulting off keeps multiplayer stable.
+-- Blend only when the feature is on AND there are 2+ distinct bands.
 local function rd_should_blend(card)
     if not rd_cfg().blend_textures then return false end
-    local list = rd_enh_layers(card)
-    return #list >= 2
+    return #rd_enh_bands(card) >= 2
 end
 
--- Draw the proportional enhancement blend in place of the single center
--- texture. `orig` is the sprite's original draw_shader; we reuse the same
--- sprite, repointing its atlas position per layer and tinting alpha via
--- the engine overlay colour (G.BRUTE_OVERLAY), which Sprite drawing
--- multiplies in.
-local function rd_draw_enh_blend(spr, card, orig, ...)
-    local list, total = rd_enh_layers(card)
-    if total <= 0 or #list < 2 then return orig(spr, 'dissolve', ...) end
+local function rd_enh_signature(card)
+    local s = card and card.ability and card.ability.rd_stacks
+    if not (s and s.enh_order) then return '' end
+    return table.concat(s.enh_order, ',')
+end
 
-    local saved_overlay = G.BRUTE_OVERLAY
-    local restore_pos = card.config and card.config.center and card.config.center.pos
+local function rd_release_canvas(card)
+    if card.rd_blend_canvas then
+        pcall(function() card.rd_blend_canvas:release() end)
+        card.rd_blend_canvas = nil
+        card.rd_blend_sig = nil
+    end
+end
 
-    -- Bottom-to-top alpha compositing. Drawing layer k at
-    -- alpha = count_k / (running total through k) makes the final pixel
-    -- equal sum(count_i / total * texture_i): the bottom layer paints
-    -- opaque, each layer above contributes exactly its share. e.g. gold
-    -- then 2x steel -> gold opaque, steel at 2/3 -> 1/3 gold, 2/3 steel.
-    local running = 0
-    for _, layer in ipairs(list) do
-        local center = G.P_CENTERS[layer.key]
+-- Composite the diagonal cake into a TWxTH canvas. Each band is the strip
+-- where the diagonal projection (x + y) falls in its [L0, L1] range; a
+-- stencil parallelogram clips that band, then we draw that enhancement's
+-- atlas tile into it. Newest band is drawn first (low projection = "top"),
+-- so the oldest ends up at the "bottom" corner.
+local function rd_build_blend_canvas(card, bands)
+    local atlas = G and G.ASSET_ATLAS and G.ASSET_ATLAS['centers']
+    if not (atlas and atlas.image and atlas.px and atlas.py) then return nil end
+    local img = atlas.image
+    local TW, TH = atlas.px, atlas.py
+    local iw, ih = img:getDimensions()
+
+    local canvas = love.graphics.newCanvas(TW, TH)
+    local prev = love.graphics.getCanvas()
+    love.graphics.push('all')
+    love.graphics.setCanvas({ canvas, stencil = true })
+    love.graphics.clear(0, 0, 0, 0)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setBlendMode('alpha')
+
+    local D = TW + TH
+    local cum = 0
+    for i = #bands, 1, -1 do
+        local band = bands[i]
+        local center = G.P_CENTERS[band.key]
         if center and center.pos then
-            running = running + layer.count
-            spr:set_sprite_pos(center.pos)
-            G.BRUTE_OVERLAY = { 1, 1, 1, layer.count / running }
-            orig(spr, 'dissolve', ...)
+            local L0 = cum * D
+            cum = cum + band.frac
+            local L1 = cum * D
+            local quad = love.graphics.newQuad(center.pos.x * TW, center.pos.y * TH, TW, TH, iw, ih)
+            love.graphics.stencil(function()
+                love.graphics.polygon('fill',
+                    L0 + 60, -60,
+                    L0 - TH - 60, TH + 60,
+                    L1 - TH - 60, TH + 60,
+                    L1 + 60, -60)
+            end, 'replace', 1)
+            love.graphics.setStencilTest('greater', 0)
+            love.graphics.draw(img, quad, 0, 0)
+            love.graphics.setStencilTest()
         end
     end
 
-    G.BRUTE_OVERLAY = saved_overlay
-    if restore_pos then spr:set_sprite_pos(restore_pos) end
+    love.graphics.setCanvas(prev)
+    love.graphics.pop()
+    return canvas
 end
 
--- Wrap the center sprite's draw_shader whenever sprites are (re)built, so
--- the 'dissolve' enhancement draw routes through our blend. All other
--- shader passes (vortex/negative/edition overlays/etc.) fall through.
+-- Build/reuse the cached canvas for a card. Rebuilds only when the
+-- application history changes; releases it when no longer blending.
+local function rd_ensure_canvas(card)
+    local bands = rd_enh_bands(card)
+    if #bands < 2 then
+        rd_release_canvas(card)
+        return nil
+    end
+    local sig = rd_enh_signature(card)
+    if card.rd_blend_canvas and card.rd_blend_sig == sig then
+        return card.rd_blend_canvas
+    end
+    rd_release_canvas(card)
+    local ok, canvas = pcall(rd_build_blend_canvas, card, bands)
+    if ok and canvas then
+        card.rd_blend_canvas = canvas
+        card.rd_blend_sig = sig
+        return canvas
+    end
+    return nil
+end
+
+-- Point a sprite at the composite canvas. The canvas is the same tile
+-- size as the centers atlas, so scale is unchanged; set_sprite_pos
+-- rebuilds the quad to cover the whole canvas.
+local function rd_point_sprite_at_canvas(spr, canvas)
+    local TW, TH = canvas:getDimensions()
+    spr.atlas = { image = canvas, px = TW, py = TH }
+    spr.scale = { x = TW, y = TH }
+    spr:set_sprite_pos({ x = 0, y = 0 })
+end
+
+-- After the vanilla sprite build (which resets the center to the centers
+-- atlas), re-point it at our composite when the card should blend.
 local rd_orig_set_sprites = Card.set_sprites
 function Card:set_sprites(_center, _front)
     local res = rd_orig_set_sprites(self, _center, _front)
-    if rd_active() and self.children and self.children.center then
-        local spr = self.children.center
-        if not spr.rd_blend_wrapped then
-            spr.rd_blend_wrapped = true
-            local card = self
-            local orig_draw_shader = spr.draw_shader
-            spr.draw_shader = function(s, _shader, ...)
-                if _shader == 'dissolve' and rd_active() and rd_should_blend(card) then
-                    return rd_draw_enh_blend(s, card, orig_draw_shader, ...)
-                end
-                return orig_draw_shader(s, _shader, ...)
-            end
+    if rd_active() and rd_cfg().blend_textures
+       and self.children and self.children.center
+       and self.ability and self.ability.rd_stacks then
+        local canvas = rd_ensure_canvas(self)
+        if canvas then
+            pcall(rd_point_sprite_at_canvas, self.children.center, canvas)
         end
     end
     return res
