@@ -1084,7 +1084,9 @@ local function rd_enh_bands(card)
     local runs = {}
     for _, field in ipairs(order) do
         local key = RD_FIELD_TO_CENTER[field]
-        if key and G.P_CENTERS and G.P_CENTERS[key] and G.P_CENTERS[key].pos then
+        -- Wild is shown as a corner drip marker, never a band (its texture
+        -- is a mostly-white card, so a wild band is just a blank stripe).
+        if field ~= 'wild' and key and G.P_CENTERS and G.P_CENTERS[key] and G.P_CENTERS[key].pos then
             local last = runs[#runs]
             if last and last.field == field then
                 last.count = last.count + 1
@@ -1103,10 +1105,16 @@ local function rd_enh_bands(card)
     return bands
 end
 
--- Blend only when the feature is on AND there are 2+ distinct bands.
+-- Blend when the feature is on AND the card needs a composite: either 2+
+-- texture bands, or 1 texture band plus wild (so the band shows under the
+-- wild drip marker). A wild-only card needs no composite -- vanilla already
+-- renders the wild texture.
 local function rd_should_blend(card)
     if not rd_cfg().blend_textures then return false end
-    return #rd_enh_bands(card) >= 2
+    local nbands = #rd_enh_bands(card)
+    if nbands >= 2 then return true end
+    local s = card.ability and card.ability.rd_stacks
+    return nbands >= 1 and s and (s.enh.wild or 0) > 0
 end
 
 local function rd_enh_signature(card)
@@ -1123,6 +1131,53 @@ local function rd_release_canvas(card)
     end
 end
 
+-- Build (once, cached) a transparent "smeared suit" icon from the wild
+-- tile: render the tile, read its pixels, and knock the light card
+-- background out to alpha 0, leaving only the coloured smeared suit. This
+-- lets the wild marker layer as a clean transparent overlay instead of a
+-- texture rectangle, so no square footprint shows over the diagonals.
+local rd_wild_icon = nil
+local rd_wild_icon_tried = false
+local function rd_get_wild_icon()
+    if rd_wild_icon or rd_wild_icon_tried then return rd_wild_icon end
+    rd_wild_icon_tried = true
+    local atlas = G and G.ASSET_ATLAS and G.ASSET_ATLAS['centers']
+    local wc = G and G.P_CENTERS and G.P_CENTERS['m_wild']
+    if not (atlas and atlas.image and atlas.px and wc and wc.pos) then return nil end
+    local ok, result = pcall(function()
+        local TW, TH = atlas.px, atlas.py
+        local iw, ih = atlas.image:getDimensions()
+        local prev = love.graphics.getCanvas()
+        local cv = love.graphics.newCanvas(TW, TH)
+        love.graphics.setCanvas(cv)
+        love.graphics.clear(0, 0, 0, 0)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setBlendMode('alpha')
+        local q = love.graphics.newQuad(wc.pos.x * TW, wc.pos.y * TH, TW, TH, iw, ih)
+        love.graphics.draw(atlas.image, q, 0, 0)
+        love.graphics.setCanvas(prev)
+        local id = cv:newImageData()
+        -- Keep the smeared suit at FULL opacity (so a bright glass band
+        -- can't wash it out) and drop the light, near-gray card face to
+        -- transparent. "Smeared" = coloured (saturated) or dark pixels.
+        local kept = 0
+        id:mapPixel(function(x, y, r, g, b, a)
+            local hi, lo = math.max(r, g, b), math.min(r, g, b)
+            if a > 0 and (hi - lo > 0.18 or hi < 0.45) then
+                kept = kept + 1
+                return r, g, b, 1
+            end
+            return r, g, b, 0
+        end)
+        cv:release()
+        rd_log('wild icon built: kept ' .. kept .. ' px')
+        return love.graphics.newImage(id)
+    end)
+    if ok and result then rd_wild_icon = result
+    else rd_log('wild icon build FAILED: ' .. tostring(result)) end
+    return rd_wild_icon
+end
+
 -- Composite the diagonal cake into a TWxTH canvas. Each band is the strip
 -- where the diagonal projection (x + y) falls in its [L0, L1] range; a
 -- stencil parallelogram clips that band, then we draw that enhancement's
@@ -1136,10 +1191,15 @@ local function rd_build_blend_canvas(card, bands)
     local iw, ih = img:getDimensions()
 
     local canvas = love.graphics.newCanvas(TW, TH)
-    local prev = love.graphics.getCanvas()
-    love.graphics.push('all')
+    -- Explicitly save/restore the render state so this is safe to run
+    -- mid-draw (the draw hook can trigger a build for a fresh copy).
+    local prev_canvas = love.graphics.getCanvas()
+    local prev_shader = love.graphics.getShader()
+    local pr, pg, pb, pa = love.graphics.getColor()
+    local prev_blend, prev_alpha = love.graphics.getBlendMode()
     love.graphics.setCanvas({ canvas, stencil = true })
     love.graphics.clear(0, 0, 0, 0)
+    love.graphics.setShader()
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.setBlendMode('alpha')
 
@@ -1166,32 +1226,35 @@ local function rd_build_blend_canvas(card, bands)
         end
     end
 
-    love.graphics.setCanvas(prev)
-    love.graphics.pop()
+    -- Wild marker: whenever the card is ever wild, layer the transparent
+    -- smeared-suit icon into the TOP-LEFT corner so it stays identifiable
+    -- even when wild isn't the active enhancement. The icon already has its
+    -- background knocked out, so it overlays cleanly with no square.
+    local s = card.ability and card.ability.rd_stacks
+    if s and (s.enh.wild or 0) > 0 then
+        local icon = rd_get_wild_icon()
+        if icon then
+            love.graphics.setStencilTest()
+            love.graphics.setBlendMode('alpha')
+            love.graphics.setColor(1, 1, 1, 1)
+            -- Full size: the wild texture's drips already sit at the corner
+            -- suit positions, so drawing 1:1 lands them naturally.
+            love.graphics.draw(icon, 0, 0)
+        end
+    end
+
+    love.graphics.setCanvas(prev_canvas)
+    love.graphics.setShader(prev_shader)
+    love.graphics.setColor(pr, pg, pb, pa)
+    love.graphics.setBlendMode(prev_blend, prev_alpha)
     return canvas
 end
 
--- Build/reuse the cached canvas for a card. Rebuilds only when the
--- application history changes; releases it when no longer blending.
-local function rd_ensure_canvas(card)
-    local bands = rd_enh_bands(card)
-    if #bands < 2 then
-        rd_release_canvas(card)
-        return nil
-    end
-    local sig = rd_enh_signature(card)
-    if card.rd_blend_canvas and card.rd_blend_sig == sig then
-        return card.rd_blend_canvas
-    end
-    rd_release_canvas(card)
-    local ok, canvas = pcall(rd_build_blend_canvas, card, bands)
-    if ok and canvas then
-        card.rd_blend_canvas = canvas
-        card.rd_blend_sig = sig
-        return canvas
-    end
-    return nil
-end
+-- True while inside the top-level draw. Building a canvas mid-draw blanks
+-- it, so when this is set we defer the build; otherwise (logic phase) we
+-- build synchronously, which avoids the one-frame "most recent only" flash
+-- after applying an enhancement or copying a card.
+local rd_drawing = false
 
 -- Point a sprite at the composite canvas. The canvas is the same tile
 -- size as the centers atlas, so scale is unchanged; set_sprite_pos
@@ -1203,20 +1266,114 @@ local function rd_point_sprite_at_canvas(spr, canvas)
     spr:set_sprite_pos({ x = 0, y = 0 })
 end
 
--- After the vanilla sprite build (which resets the center to the centers
--- atlas), re-point it at our composite when the card should blend.
+-- Build the canvas, cache it, and repoint the sprite. LOGIC PHASE ONLY:
+-- rendering to a canvas mid-draw produces a blank result (which is what
+-- broke copies and the deck view), so this must never run inside draw.
+local function rd_build_and_cache(card, sig)
+    if not rd_should_blend(card) then rd_release_canvas(card); return false end
+    local bands = rd_enh_bands(card)
+    rd_release_canvas(card)
+    local ok, canvas = pcall(rd_build_blend_canvas, card, bands)
+    if not (ok and canvas) then
+        rd_log('blend build FAILED: ' .. tostring(canvas))
+        return false
+    end
+    card.rd_blend_canvas = canvas
+    card.rd_blend_sig = sig
+    local spr = card.children and card.children.center
+    if spr and pcall(rd_point_sprite_at_canvas, spr, canvas) then
+        spr.rd_canvas_sig = sig
+    end
+    rd_log('blend built: ' .. sig)
+    return true
+end
+
+-- Defer a (re)build to the next logic tick (an E_MANAGER event runs in
+-- update, not draw), so the render-to-canvas never happens mid-draw.
+-- Debounced per history signature so we schedule at most one per change.
+local function rd_schedule_build(card, sig)
+    if card.rd_blend_pending == sig then return end
+    card.rd_blend_pending = sig
+    G.E_MANAGER:add_event(Event({
+        trigger = 'immediate',
+        func = function()
+            card.rd_blend_pending = nil
+            if rd_enh_signature(card) == sig then rd_build_and_cache(card, sig) end
+            return true
+        end,
+    }))
+end
+
+-- Ensure the card's center sprite shows the current diagonal cake. If the
+-- canvas already exists for this exact history, repoint immediately;
+-- otherwise schedule a logic-phase build. Sig-cached, so steady state is
+-- just a string compare and an early return.
+local function rd_apply_blend(card)
+    if not (rd_active() and rd_cfg().blend_textures
+            and card.ability and card.ability.rd_stacks
+            and card.children and card.children.center) then
+        return
+    end
+    if not rd_should_blend(card) then return end
+    local spr = card.children.center
+    local sig = rd_enh_signature(card)
+    if spr.rd_canvas_sig == sig and card.rd_blend_canvas then return end
+    if card.rd_blend_canvas and card.rd_blend_sig == sig then
+        if pcall(rd_point_sprite_at_canvas, spr, card.rd_blend_canvas) then
+            spr.rd_canvas_sig = sig
+        end
+        return
+    end
+    -- Build now if we're in the logic phase (no flash); defer if mid-draw.
+    if rd_drawing then
+        rd_schedule_build(card, sig)
+    else
+        rd_build_and_cache(card, sig)
+    end
+end
+
+-- Vanilla set_sprites resets the center back to the centers atlas, so
+-- invalidate our per-sprite cache and re-apply.
 local rd_orig_set_sprites = Card.set_sprites
 function Card:set_sprites(_center, _front)
     local res = rd_orig_set_sprites(self, _center, _front)
-    if rd_active() and rd_cfg().blend_textures
-       and self.children and self.children.center
-       and self.ability and self.ability.rd_stacks then
-        local canvas = rd_ensure_canvas(self)
-        if canvas then
-            pcall(rd_point_sprite_at_canvas, self.children.center, canvas)
-        end
+    if self.children and self.children.center then
+        self.children.center.rd_canvas_sig = nil
     end
+    rd_apply_blend(self)
     return res
+end
+
+-- Draw is the one path EVERY display context goes through (hand, deck,
+-- deck view, freshly drawn cards, copies from DNA/Death). Re-applying here
+-- covers the cases set_sprites misses, while the sig cache keeps it cheap.
+local rd_orig_card_draw = Card.draw
+function Card:draw(layer)
+    rd_apply_blend(self)
+    return rd_orig_card_draw(self, layer)
+end
+
+-- Mark the draw phase so rd_apply_blend knows to defer builds while the
+-- top-level draw is running.
+local rd_orig_game_draw = Game.draw
+function Game:draw(...)
+    rd_drawing = true
+    local ok, err = pcall(rd_orig_game_draw, self, ...)
+    rd_drawing = false
+    if not ok then error(err) end
+end
+
+-- copy_card builds the new card's sprite BEFORE copying the ability table,
+-- so set_sprites runs without rd_stacks and misses the blend. Build the
+-- copy's canvas right after the copy completes (logic phase = no flash).
+local rd_orig_copy_card = copy_card
+function copy_card(...)
+    local card = rd_orig_copy_card(...)
+    if rd_active() and rd_cfg().blend_textures and not rd_drawing
+       and card and card.ability and card.ability.rd_stacks and rd_should_blend(card) then
+        pcall(rd_build_and_cache, card, rd_enh_signature(card))
+    end
+    return card
 end
 
 ----------------------------------------------------------------------
