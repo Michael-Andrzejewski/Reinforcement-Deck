@@ -20,6 +20,12 @@
 ----------------------------------------------------------------------
 
 local RD_DEBUG = false
+
+-- TEST ONLY: when true, every new run starts with 10 Aura spectrals so the
+-- edition-band blend is easy to exercise (Aura adds a random edition; apply
+-- several to one card to stack). Leave false for shipping.
+local RD_BLEND_TEST = false
+
 local function rd_log(msg)
     if not RD_DEBUG then return end
     if sendInfoMessage then sendInfoMessage(msg, "ReinforcementDeck") end
@@ -40,10 +46,11 @@ local rd_config_defaults = {
     -- Heidelberg effect (Perkeo without the Joker): at the end of each
     -- shop, create a Negative copy of a random held consumable.
     heidelberg = false,
-    -- Experimental: blend stacked enhancement textures proportionally.
-    -- Off by default -- it is cosmetic and has caused visual glitches in
-    -- multiplayer (erased ranks, stuck textures). See the renderer notes.
-    blend_textures = false,
+    -- Blend stacked modifiers so multiple show on one card at once:
+    -- enhancement textures as a diagonal cake, seals as a pie, and edition
+    -- shaders as diagonal bands on the opposite diagonal. Purely cosmetic;
+    -- scoring is untouched. On by default. See the renderer notes.
+    blend = true,
     -- Shop appearance weights. Vanilla defaults: tarot 4, planet 4,
     -- spectral 0, joker 20. We default joker to 0 (jokerless) and the
     -- rest to vanilla, which reproduces the deck's normal shop.
@@ -123,6 +130,16 @@ local function rd_blank_stacks()
         -- to draw the diagonal "cake": consecutive same-type runs merge
         -- into one band sized by its share of the total applications.
         enh_order = {},
+        -- Ordered history of seal applications (seal names, e.g. 'Red'),
+        -- used to draw the seal "pie": each application is one equal wedge,
+        -- newest at the top-left sweeping clockwise. No run merging here --
+        -- two same-colour seals are two wedges (they just look identical).
+        seal_order = {},
+        -- Ordered history of edition applications (field names: foil /
+        -- holographic / polychrome). Drawn as diagonal bands on the OTHER
+        -- diagonal from enhancements (bottom-left to top-right), newest at
+        -- the top-right, consecutive same-type runs merged like the cake.
+        edit_order = {},
     }
 end
 
@@ -189,12 +206,16 @@ local function rd_ensure_stacks(card)
 
     if card.seal and RD_SEAL_KEY_MAP[card.seal] then
         s.seal[RD_SEAL_KEY_MAP[card.seal]] = 1
+        s.seal_order[#s.seal_order + 1] = card.seal
     end
 
     if card.edition then
         local etype = rd_normalize_edition(card.edition)
         local field = etype and RD_EDITION_FIELD_MAP[etype]
-        if field then s.edit[field] = 1 end
+        if field then
+            s.edit[field] = 1
+            s.edit_order[#s.edit_order + 1] = field
+        end
     end
 
     card.ability.rd_stacks = s
@@ -239,6 +260,12 @@ SMODS.Atlas({
 -- (e.g. 'c_chariot', 'c_aura', etc.) to give the player extras at run
 -- start; the queue handles vanilla's apply_to_run race condition.
 local RD_STARTING_CONSUMABLES = {}
+
+-- Edition-band test loadout: 10 Aura (each adds a random edition; apply
+-- several to one card to stack the diagonal bands).
+if RD_BLEND_TEST then
+    for _ = 1, 10 do RD_STARTING_CONSUMABLES[#RD_STARTING_CONSUMABLES + 1] = 'c_aura' end
+end
 
 local function rd_queue_consumable(idx)
     local key = RD_STARTING_CONSUMABLES[idx]
@@ -484,6 +511,7 @@ function Card:set_edition(edition, immediate, silent, delay)
         rd_ensure_stacks(self)
         local field = RD_EDITION_FIELD_MAP[etype]
         self.ability.rd_stacks.edit[field] = self.ability.rd_stacks.edit[field] + 1
+        self.ability.rd_stacks.edit_order[#self.ability.rd_stacks.edit_order + 1] = field
     end
     return rd_orig_set_edition(self, edition, immediate, silent, delay)
 end
@@ -574,14 +602,22 @@ end
 -- new_card:set_seal(other.seal, true) after copying the ability table,
 -- which already contains rd_stacks. Without this guard the destination
 -- ends up with seal_count = source + 1.
+-- Forward declaration: the seal-pie renderer is defined far below (next to
+-- the enhancement blend), but set_seal needs to trigger a build here, in the
+-- logic phase, so the pie is ready before the next draw (no one-frame flash).
+local rd_apply_seal_blend
+
 local rd_orig_set_seal = Card.set_seal
 function Card:set_seal(_seal, silent, immediate)
     if rd_active() and not silent and _seal and RD_SEAL_KEY_MAP[_seal] then
         rd_ensure_stacks(self)
         local field = RD_SEAL_KEY_MAP[_seal]
         self.ability.rd_stacks.seal[field] = self.ability.rd_stacks.seal[field] + 1
+        self.ability.rd_stacks.seal_order[#self.ability.rd_stacks.seal_order + 1] = _seal
     end
-    return rd_orig_set_seal(self, _seal, silent, immediate)
+    local res = rd_orig_set_seal(self, _seal, silent, immediate)
+    if rd_apply_seal_blend then rd_apply_seal_blend(self) end
+    return res
 end
 
 -- Wild and Stone enhancements affect suit-matching. Vanilla checks
@@ -1110,7 +1146,7 @@ end
 -- wild drip marker). A wild-only card needs no composite -- vanilla already
 -- renders the wild texture.
 local function rd_should_blend(card)
-    if not rd_cfg().blend_textures then return false end
+    if not rd_cfg().blend then return false end
     local nbands = #rd_enh_bands(card)
     if nbands >= 2 then return true end
     local s = card.ability and card.ability.rd_stacks
@@ -1309,7 +1345,7 @@ end
 -- otherwise schedule a logic-phase build. Sig-cached, so steady state is
 -- just a string compare and an early return.
 local function rd_apply_blend(card)
-    if not (rd_active() and rd_cfg().blend_textures
+    if not (rd_active() and rd_cfg().blend
             and card.ability and card.ability.rd_stacks
             and card.children and card.children.center) then
         return
@@ -1344,12 +1380,388 @@ function Card:set_sprites(_center, _front)
     return res
 end
 
+----------------------------------------------------------------------
+-- Seal blend ("pie")
+--
+-- Seals always draw at the same fixed spot, so stacked seals composite as
+-- a pie: N applications -> N equal wedges of 360/N. The most recent seal's
+-- wedge starts at the top-left (the 9 o'clock edge) and sweeps clockwise,
+-- so older seals trail clockwise behind it. Example: Blue, Red, Blue,
+-- Purple -> Purple top-left, Blue top-right, Red bottom-right, Blue
+-- bottom-left. Built once into a per-card canvas (cached by history), then
+-- the shared seal sprite is pointed at that canvas just for this card's
+-- draw and restored after -- so vanilla handles tilt/shadow/position and
+-- there is no double-draw. Cosmetic only; off by default.
+----------------------------------------------------------------------
+
+-- Seal name -> tile position in the centers atlas (matches game.lua
+-- shared_seals). Hardcoded so a build is never affected by the temporary
+-- sprite swap during draw.
+local RD_SEAL_TILE = { Red = {5,4}, Blue = {6,4}, Gold = {2,0}, Purple = {4,4} }
+
+local function rd_seal_signature(card)
+    local s = card and card.ability and card.ability.rd_stacks
+    if not (s and s.seal_order) then return '' end
+    return table.concat(s.seal_order, ',')
+end
+
+-- Number of drawable seal applications. 2+ means a pie is worth compositing
+-- (a single seal is drawn fine by vanilla).
+local function rd_seal_count(card)
+    local s = card and card.ability and card.ability.rd_stacks
+    local order = s and s.seal_order
+    if not order then return 0 end
+    local n = 0
+    for _, name in ipairs(order) do if RD_SEAL_TILE[name] then n = n + 1 end end
+    return n
+end
+
+local function rd_should_blend_seal(card)
+    if not rd_cfg().blend then return false end
+    return rd_seal_count(card) >= 2
+end
+
+-- Coin centre (in tile pixels) for the loaded atlas, found once by scanning
+-- a seal tile's opaque pixels. The wedge fans radiate from this point, and
+-- the opaque coin itself provides the round outer boundary, so we only need
+-- the centre, not a radius.
+local rd_seal_geom = nil
+local rd_seal_geom_tried = false
+local function rd_get_seal_geom()
+    if rd_seal_geom or rd_seal_geom_tried then return rd_seal_geom end
+    rd_seal_geom_tried = true
+    local atlas = G and G.ASSET_ATLAS and G.ASSET_ATLAS['centers']
+    if not (atlas and atlas.image and atlas.px and atlas.py) then return nil end
+    local ok, result = pcall(function()
+        local TW, TH = atlas.px, atlas.py
+        local iw, ih = atlas.image:getDimensions()
+        local prev = love.graphics.getCanvas()
+        local cv = love.graphics.newCanvas(TW, TH)
+        love.graphics.setCanvas(cv)
+        love.graphics.clear(0, 0, 0, 0)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setBlendMode('alpha')
+        local pos = RD_SEAL_TILE['Blue']
+        local q = love.graphics.newQuad(pos[1] * TW, pos[2] * TH, TW, TH, iw, ih)
+        love.graphics.draw(atlas.image, q, 0, 0)
+        love.graphics.setCanvas(prev)
+        local id = cv:newImageData()
+        local minx, miny, maxx, maxy = TW, TH, 0, 0
+        local found = false
+        id:mapPixel(function(x, y, r, g, b, a)
+            if a > 0.2 then
+                found = true
+                if x < minx then minx = x end
+                if x > maxx then maxx = x end
+                if y < miny then miny = y end
+                if y > maxy then maxy = y end
+            end
+            return r, g, b, a
+        end)
+        cv:release()
+        if not found then return nil end
+        return { cx = (minx + maxx) / 2, cy = (miny + maxy) / 2 }
+    end)
+    if ok and result then rd_seal_geom = result
+    else rd_log('seal geom build FAILED: ' .. tostring(result)) end
+    return rd_seal_geom
+end
+
+-- Composite the seal pie into a TWxTH canvas. Wedge i (i=1 = most recent)
+-- spans [270 + (i-1)*sliceW, +sliceW] degrees, measured clockwise from the
+-- top, drawn as a stencil fan from the coin centre. The seal tile is drawn
+-- through that stencil, so only the coin pixels inside the wedge show.
+local function rd_build_seal_canvas(card)
+    local atlas = G and G.ASSET_ATLAS and G.ASSET_ATLAS['centers']
+    if not (atlas and atlas.image and atlas.px and atlas.py) then return nil end
+    local geom = rd_get_seal_geom()
+    if not geom then return nil end
+    local order = card.ability and card.ability.rd_stacks and card.ability.rd_stacks.seal_order
+    if not order then return nil end
+
+    -- Drawable wedges, newest first.
+    local wedges = {}
+    for i = #order, 1, -1 do
+        if RD_SEAL_TILE[order[i]] then wedges[#wedges + 1] = order[i] end
+    end
+    local N = #wedges
+    if N < 2 then return nil end
+
+    local img = atlas.image
+    local TW, TH = atlas.px, atlas.py
+    local iw, ih = img:getDimensions()
+    local sliceW = 360 / N
+    local cx, cy, BIG = geom.cx, geom.cy, TW + TH
+
+    local canvas = love.graphics.newCanvas(TW, TH)
+    local prev_canvas = love.graphics.getCanvas()
+    local prev_shader = love.graphics.getShader()
+    local pr, pg, pb, pa = love.graphics.getColor()
+    local prev_blend, prev_alpha = love.graphics.getBlendMode()
+    love.graphics.setCanvas({ canvas, stencil = true })
+    love.graphics.clear(0, 0, 0, 0)
+    love.graphics.setShader()
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setBlendMode('alpha')
+
+    for i = 1, N do
+        local pos = RD_SEAL_TILE[wedges[i]]
+        local a0 = 270 + (i - 1) * sliceW
+        local a1 = a0 + sliceW
+        local quad = love.graphics.newQuad(pos[1] * TW, pos[2] * TH, TW, TH, iw, ih)
+        love.graphics.stencil(function()
+            local pts = { cx, cy }
+            local steps = math.max(2, math.ceil(sliceW / 6))
+            for s = 0, steps do
+                local rad = math.rad(a0 + (a1 - a0) * (s / steps))
+                pts[#pts + 1] = cx + BIG * math.sin(rad)
+                pts[#pts + 1] = cy - BIG * math.cos(rad)
+            end
+            love.graphics.polygon('fill', pts)
+        end, 'replace', 1)
+        love.graphics.setStencilTest('greater', 0)
+        love.graphics.draw(img, quad, 0, 0)
+        love.graphics.setStencilTest()
+    end
+
+    love.graphics.setCanvas(prev_canvas)
+    love.graphics.setShader(prev_shader)
+    love.graphics.setColor(pr, pg, pb, pa)
+    love.graphics.setBlendMode(prev_blend, prev_alpha)
+    return canvas
+end
+
+local function rd_release_seal_canvas(card)
+    if card.rd_seal_canvas then
+        pcall(function() card.rd_seal_canvas:release() end)
+        card.rd_seal_canvas = nil
+        card.rd_seal_sig = nil
+    end
+end
+
+local function rd_build_and_cache_seal(card, sig)
+    if not rd_should_blend_seal(card) then rd_release_seal_canvas(card); return false end
+    rd_release_seal_canvas(card)
+    local ok, canvas = pcall(rd_build_seal_canvas, card)
+    if not (ok and canvas) then
+        rd_log('seal blend build FAILED: ' .. tostring(canvas))
+        return false
+    end
+    card.rd_seal_canvas = canvas
+    card.rd_seal_sig = sig
+    rd_log('seal blend built: ' .. sig)
+    return true
+end
+
+-- Defer a (re)build to the next logic tick (events run in update, not draw)
+-- so render-to-canvas never happens mid-draw. Debounced per signature.
+local function rd_schedule_seal_build(card, sig)
+    if card.rd_seal_pending == sig then return end
+    card.rd_seal_pending = sig
+    G.E_MANAGER:add_event(Event({
+        trigger = 'immediate',
+        func = function()
+            card.rd_seal_pending = nil
+            if rd_seal_signature(card) == sig then rd_build_and_cache_seal(card, sig) end
+            return true
+        end,
+    }))
+end
+
+-- Assigned to the forward-declared local so set_seal (defined far above)
+-- can call it. Build now in the logic phase (no flash), defer if mid-draw.
+rd_apply_seal_blend = function(card)
+    if not (rd_active() and rd_cfg().blend
+            and card.ability and card.ability.rd_stacks) then
+        return
+    end
+    if not rd_should_blend_seal(card) then rd_release_seal_canvas(card); return end
+    local sig = rd_seal_signature(card)
+    if card.rd_seal_canvas and card.rd_seal_sig == sig then return end
+    if rd_drawing then rd_schedule_seal_build(card, sig)
+    else rd_build_and_cache_seal(card, sig) end
+end
+
+-- Point the shared seal sprite at this card's pie canvas for the duration
+-- of one vanilla draw, returning a restore closure. Vanilla then draws the
+-- pie with the seal's normal shader/tilt/position. The swap is undone the
+-- instant the draw returns, so the shared sprite is never left mutated.
+local function rd_seal_swap_in(card)
+    if not (rd_active() and rd_cfg().blend and card.seal and card.rd_seal_canvas) then
+        return nil
+    end
+    if not rd_should_blend_seal(card) then return nil end
+    if card.rd_seal_sig ~= rd_seal_signature(card) then return nil end
+    local spr = G.shared_seals and G.shared_seals[card.seal]
+    if not spr then return nil end
+    local saved = {
+        atlas = spr.atlas, scale = spr.scale, sprite = spr.sprite,
+        sprite_pos = spr.sprite_pos, sprite_pos_copy = spr.sprite_pos_copy,
+        image_dims = spr.image_dims,
+    }
+    if not pcall(rd_point_sprite_at_canvas, spr, card.rd_seal_canvas) then return nil end
+    return function()
+        spr.atlas = saved.atlas
+        spr.scale = saved.scale
+        spr.sprite = saved.sprite
+        spr.sprite_pos = saved.sprite_pos
+        spr.sprite_pos_copy = saved.sprite_pos_copy
+        spr.image_dims = saved.image_dims
+    end
+end
+
+----------------------------------------------------------------------
+-- Edition blend (diagonal bands, the OTHER diagonal)
+--
+-- Editions are animated shaders (foil/holo/polychrome), not static tiles,
+-- so they can't be baked into a canvas without freezing the shimmer. Each
+-- one is drawn LIVE, clipped to its diagonal band. Bands run along the
+-- bottom-left -> top-right diagonal (projection p = x - y + H), newest at
+-- the top-right, consecutive same-type runs merged like the enhancement
+-- cake. We enable every stacked edition on self.edition so vanilla runs
+-- each shader pass, and a draw_shader hook stencils each pass to its band.
+-- The card render target has a stencil buffer (game.lua sets the main
+-- canvas with stencil=true) and prep_draw maps the band to the same screen
+-- space the shader draws in. Cosmetic only; off by default.
+----------------------------------------------------------------------
+
+-- edition field <-> shader / self.edition key. The holographic field is
+-- the shader/key 'holo'; foil and polychrome match their own names.
+local RD_FIELD_SHADER = { foil = 'foil', holographic = 'holo', polychrome = 'polychrome' }
+local RD_SHADER_FIELD = { foil = 'foil', holo = 'holographic', polychrome = 'polychrome' }
+
+-- Run-length encode edit_order into bands, oldest -> newest. Each band is
+-- { field, n0, n1 } where [n0,n1] is its share of the bottom-left(0) ->
+-- top-right(1) axis. Newest band ends at 1 (top-right).
+local function rd_edit_bands(card)
+    local s = card and card.ability and card.ability.rd_stacks
+    local order = s and s.edit_order
+    if not order or #order == 0 then return {} end
+    local runs = {}
+    for _, field in ipairs(order) do
+        if RD_FIELD_SHADER[field] then
+            local last = runs[#runs]
+            if last and last.field == field then last.count = last.count + 1
+            else runs[#runs + 1] = { field = field, count = 1 } end
+        end
+    end
+    local total = 0
+    for _, r in ipairs(runs) do total = total + r.count end
+    if total == 0 then return {} end
+    local bands, cum = {}, 0
+    for _, r in ipairs(runs) do
+        local n0 = cum / total
+        cum = cum + r.count
+        bands[#bands + 1] = { field = r.field, n0 = n0, n1 = cum / total }
+    end
+    return bands
+end
+
+local function rd_should_blend_editions(card)
+    if not rd_cfg().blend then return false end
+    return #rd_edit_bands(card) >= 2
+end
+
+-- All band ranges that belong to a given edition field (a field can appear
+-- in more than one band if it was applied, replaced, then applied again).
+local function rd_edition_ranges(card, field)
+    local out = {}
+    for _, b in ipairs(rd_edit_bands(card)) do
+        if b.field == field then out[#out + 1] = { n0 = b.n0, n1 = b.n1 } end
+    end
+    return out
+end
+
+-- A self.edition table with every stacked edition flag on, so vanilla's
+-- separate (non-exclusive) if-blocks each run their shader pass. Negative
+-- is preserved from the real edition if present.
+local function rd_make_multi_edition(card)
+    local s = card.ability.rd_stacks
+    local e = {}
+    for field, key in pairs(RD_FIELD_SHADER) do
+        if (s.edit[field] or 0) > 0 then e[key] = true end
+    end
+    if card.edition and card.edition.negative then e.negative = true end
+    return e
+end
+
+-- The card currently being drawn with the edition blend active. The
+-- draw_shader hook reads this to know which card's bands to clip to.
+local rd_edition_ctx = nil
+
+-- Clear the stencil to 0, stamp this edition's band(s) to 1, and enable the
+-- test. keepvalues=false wipes any stale stencil from earlier draws so the
+-- edition only shows inside its band.
+local function rd_set_edition_stencil(spr, ranges)
+    local W, H = spr.VT.w, spr.VT.h
+    local D = W + H
+    local EM = D
+    love.graphics.stencil(function()
+        prep_draw(spr, 1)
+        for _, rg in ipairs(ranges) do
+            local M0 = rg.n0 * D - H
+            local M1 = rg.n1 * D - H
+            love.graphics.polygon('fill',
+                M0 - EM,     -EM,
+                M0 + H + EM, H + EM,
+                M1 + H + EM, H + EM,
+                M1 - EM,     -EM)
+        end
+        love.graphics.pop()
+    end, 'replace', 1, false)
+    love.graphics.setStencilTest('greater', 0)
+end
+
+-- Intercept the center/front edition shader passes of a blended card and
+-- clip each to its band. Everything else falls straight through.
+local rd_orig_sprite_draw_shader = Sprite.draw_shader
+function Sprite:draw_shader(_shader, ...)
+    local card = rd_edition_ctx
+    if card and _shader and RD_SHADER_FIELD[_shader] and card.children
+       and (self == card.children.center or self == card.children.front) then
+        local ranges = rd_edition_ranges(card, RD_SHADER_FIELD[_shader])
+        if #ranges > 0 then
+            local applied = pcall(rd_set_edition_stencil, self, ranges)
+            rd_orig_sprite_draw_shader(self, _shader, ...)
+            if applied then love.graphics.setStencilTest() end
+            return
+        end
+    end
+    return rd_orig_sprite_draw_shader(self, _shader, ...)
+end
+
 -- Draw is the one path EVERY display context goes through (hand, deck,
 -- deck view, freshly drawn cards, copies from DNA/Death). Re-applying here
 -- covers the cases set_sprites misses, while the sig cache keeps it cheap.
 local rd_orig_card_draw = Card.draw
 function Card:draw(layer)
     rd_apply_blend(self)
+    rd_apply_seal_blend(self)
+    local seal_restore = rd_seal_swap_in(self)
+
+    -- Edition blend: turn on every stacked edition so vanilla runs each
+    -- shader pass, and route them through the draw_shader hook for clipping.
+    local edit_on = rd_active() and rd_cfg().blend and rd_should_blend_editions(self)
+    local prev_ctx, saved_edition
+    if edit_on then
+        prev_ctx = rd_edition_ctx
+        rd_edition_ctx = self
+        saved_edition = self.edition
+        self.edition = rd_make_multi_edition(self)
+    end
+
+    if seal_restore or edit_on then
+        -- pcall the rare swapped/blended path so a draw error can't leave
+        -- the shared seal sprite or self.edition mutated.
+        local ok, ret = pcall(rd_orig_card_draw, self, layer)
+        if edit_on then
+            self.edition = saved_edition
+            rd_edition_ctx = prev_ctx
+        end
+        if seal_restore then seal_restore() end
+        if not ok then error(ret) end
+        return ret
+    end
     return rd_orig_card_draw(self, layer)
 end
 
@@ -1369,9 +1781,13 @@ end
 local rd_orig_copy_card = copy_card
 function copy_card(...)
     local card = rd_orig_copy_card(...)
-    if rd_active() and rd_cfg().blend_textures and not rd_drawing
-       and card and card.ability and card.ability.rd_stacks and rd_should_blend(card) then
-        pcall(rd_build_and_cache, card, rd_enh_signature(card))
+    if rd_active() and not rd_drawing and card and card.ability and card.ability.rd_stacks then
+        if rd_cfg().blend and rd_should_blend(card) then
+            pcall(rd_build_and_cache, card, rd_enh_signature(card))
+        end
+        if rd_cfg().blend and rd_should_blend_seal(card) then
+            pcall(rd_build_and_cache_seal, card, rd_seal_signature(card))
+        end
     end
     return card
 end
@@ -1419,8 +1835,8 @@ if rd_mod_handle then
                      slider('Joker slots', 'joker_slots', 0, 10)),
                 pair(toggle('Plasma (equalize)', 'plasma'),
                      toggle('Heidelberg copy', 'heidelberg')),
-                pair(toggle('Blend textures (experimental)', 'blend_textures'),
-                     { n = G.UIT.T, config = { text = '', scale = 0.01, colour = G.C.CLEAR } }),
+                pair(toggle('Blend stacked modifiers', 'blend'),
+                     { n = G.UIT.T, config = { text = 'enhancements, seals, editions', scale = 0.28, colour = G.C.UI.TEXT_LIGHT } }),
                 label_row('Shop weights (tarot/planet default 4, spectral/joker default 0):'),
                 pair(slider('Tarot', 'tarot_rate', 0, 50),
                      slider('Planet', 'planet_rate', 0, 50)),
